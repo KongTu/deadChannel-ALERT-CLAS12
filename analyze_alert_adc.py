@@ -49,7 +49,15 @@ def load(path):
     missing = needed - set(df.columns)
     if missing:
         sys.exit(f"ERROR: input is missing column(s): {sorted(missing)}")
-    df = df.dropna(subset=["value"])
+    # Coerce to numeric; blanks or non-numeric entries (e.g. leftover ATOF rows
+    # with empty layer/wire) become NaN so we can drop them cleanly.
+    for c in ("run", "layer_number", "wire", "value"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    before = len(df)
+    df = df.dropna(subset=["run", "layer_number", "wire", "value"])
+    dropped = before - len(df)
+    if dropped:
+        print(f"note: dropped {dropped} row(s) with blank run/layer/wire/value")
     for c in ("run", "layer_number", "wire"):
         df[c] = df[c].astype(int)
     df["value"] = df["value"].astype(float)
