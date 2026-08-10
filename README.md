@@ -185,6 +185,8 @@ Good candidates are the run numbers where the bad-channel count steps in
 | `--threshold X` | 5.0 | robust-z cutoff for an `outlier` |
 | `--window N` | 11 | rolling-median window (runs) used as the local baseline |
 | `--min-scale F` | 0.05 | floor on the robust sigma, in `cv` units |
+| `--min-healthy N` | 20 | runs needed to estimate a wire's norm; below this `cv` is undefined |
+| `--min-brightness F` | 0.5 | only runs at least this bright are used to estimate a norm |
 | `--margin F` | 1.3 | also list channels within this factor of a cut |
 | `--min-gain F` | 0.1 | runs dimmer than this are marked `run_ok = False` |
 | `--max-gain F` | 10 | runs brighter than this are marked `run_ok = False` |
@@ -199,10 +201,10 @@ With no mode option at all, the tool performs a full scan.
 scanning them tells you how firm the answer is:
 
 ```bash
-# a channel must fall below 40 % of normal to count as dead -> 11 channels in run 22603
+# a channel must fall below 40 % of normal to count as dead -> fewer channels
 python analyze_alert_adc.py all.csv --run 22603 --dead-frac 0.4 --run-prefix r22603_dead040
 
-# below 60 % is enough -> 17 channels in run 22603
+# below 60 % is enough -> more channels
 python analyze_alert_adc.py all.csv --run 22603 --dead-frac 0.6 --run-prefix r22603_dead060
 ```
 
@@ -253,7 +255,7 @@ detector would be flagged for a property of the run.
 
 | symbol | definition | meaning |
 |---|---|---|
-| `wire_med` | median of `value` over all runs, per wire | the wire's own normal |
+| `wire_med` | median of `value` over the wire's healthy runs at a normal detector level | the wire's own normal |
 | `rel` | `value / wire_med` | the wire relative to its own normal |
 | `gain` | median of `rel` over all wires in the same **run and layer** | how bright this run was |
 | `cv` | `rel / gain` | **what the per-run cuts act on** |
@@ -262,6 +264,19 @@ detector would be flagged for a property of the run.
 scale is removed. A dead wire goes to `cv → 0`, a hot one to `cv ≫ 1`, regardless of how
 bright the run was. The gain is taken **per layer** so that a change affecting one
 superlayer does not leak into the others.
+
+**Estimating `wire_med`.** It has to be the wire's *healthy* level, so it is taken over the
+runs where the wire reads like its layer **and** the detector was at a normal level
+(`--min-brightness`, default 0.5). A plain median over a wire's whole history is wrong for
+any wire broken for a large share of the campaign: the norm lands between its dead and
+healthy levels, and its *good* runs then read about twice that norm and are flagged hot.
+Allowing dim runs into the estimate fails the same way by another route, since a weak wire
+most resembles its neighbours exactly when everything is compressed.
+
+A wire that never shows `--min-healthy` (default 20) such runs gets no norm: `cv` is left
+undefined and the wire is judged on `rel_to_layer` alone. Two wires are in that position
+over 21317–23061, L1 W46 and L2 W55. If a wire's normal level was never observed, there is
+no honest statement to make about it having changed from normal.
 
 **Runs where the detector was effectively off.** Dividing by the gain rescues a run that
 is uniformly 30 % low; it does not rescue a run with `gain ≈ 0.01`, where the values are
@@ -306,19 +321,18 @@ run 22897, where the detector was at 28 % of normal.
 **Every cut is per run.** A wire is judged on the run in front of you, never by a
 campaign-wide verdict stamped onto every run, so a wire that degrades partway through the
 campaign is flagged in the runs where it is weak and left alone in the others. Across
-21317–23061 only three wires are below half their layer in more than half of all runs:
+21317–23061 only two wires are below half their layer in more than half of all runs:
 
 | wire | median `rel_to_layer` | runs below 0.5 |
 |---|---|---|
 | L1 W46 | 0.30 | 59 % |
 | L2 W55 | 0.33 | 60 % |
-| L3 W56 | 0.39 | 55 % |
 
 ### Near-threshold channels
 
 A threshold is a line through a continuum, so the per-run report also lists channels that
 came within `--margin` (default 1.3, i.e. 30 %) of a cut without firing. In run 22603
-that is 12 channels, among them L4 W67 at `rel_to_layer` 0.52 and L6 W61 at 0.57.
+that is 6 channels, among them L4 W67 at `rel_to_layer` 0.52.
 
 ### Glossary
 
@@ -390,8 +404,8 @@ CCDB, the Calibration Constant Database, which holds a given set of constants ag
 if a wire's status is constant over long stretches, and fits badly if channels die one at
 a time at random runs, since each event then needs its own range.
 
-`--segments` measures this directly. Over the reliable runs the dataset gives 1118 bad
-segments across 293 wires. Just under half of the segments are a single run, but those
+`--segments` measures this directly. Over the reliable runs the dataset gives 1051 bad
+segments across 292 wires. Just under half of the segments are a single run, but those
 single-run segments carry only **2 %** of all bad (run, wire) entries: the content is
 dominated by long stable stretches. Run-range tables are therefore a reasonable fit,
 with the short segments either dropped by a minimum-length cut or held in a small

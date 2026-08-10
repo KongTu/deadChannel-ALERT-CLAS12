@@ -34,13 +34,29 @@ be made. Judged against its own neighboring runs alone, a wire in a run that is
 globally 6 % low sits many robust sigmas below its local baseline -- and so does
 every other wire, so the whole detector is flagged for a property of the run.
 
-    rel      = value / (this wire's median over all runs)
+    rel      = value / wire_med    wire_med = the wire's healthy level: the
+                                   median of `value` over the runs where it
+                                   reads like its layer (step 3) AND the
+                                   detector was at a normal level
     gain     = median of `rel` over all wires in the same run and layer
     cv       = rel / gain          <- "corrected value", what the per-run cuts use
 
 `cv` is 1.0 for a wire behaving at its own typical level once the run-wide (and
 layer-wide) scale has been divided out. A dead wire has cv -> 0 and a hot wire
 cv >> 1, regardless of how bright or dim the run was overall.
+
+`wire_med` is estimated only from the wire's healthy runs, and only from runs
+where the detector was at a normal level. Both conditions matter. A median over
+a wire's whole history puts the norm of a wire broken for much of the campaign
+between its dead and healthy levels, so its GOOD runs read about 2x that norm
+and are flagged hot; allowing dim runs into the estimate does the same by
+another route, since a weak wire resembles its neighbours exactly when
+everything is compressed.
+
+A wire with fewer than --min-healthy such runs gets no norm at all: `cv` is left
+undefined and the wire is judged on `rel_to_layer` alone. If its normal level
+was never observed, there is no honest statement to make about it having
+changed from normal.
 
 The gain is taken per layer as well as per run, so a change affecting one
 superlayer does not leak into the others. Runs whose overall level is far from
@@ -145,30 +161,64 @@ def load(path):
 # --------------------------------------------------------------------------
 # run-level normalization
 # --------------------------------------------------------------------------
-def add_normalization(df, per_layer=True):
-    """Add wire_med, rel, gain and cv (see module docstring).
+def add_normalization(df, per_layer=True, dead_frac=0.5, hot_frac=2.0,
+                      min_healthy=20, min_brightness=0.5):
+    """Add lay_med, rel_to_layer, wire_med, rel, gain and cv.
 
     per_layer=True computes the run gain within each layer, which also absorbs
     layer-dependent run effects (e.g. a threshold change on one superlayer).
     """
     df = df.copy()
-    df["wire_med"] = df.groupby(["layer_number", "wire"]).value.transform("median")
-    # A wire dead in every single run would have wire_med == 0, leaving `rel`
-    # undefined; the rel_to_layer cut below is what catches those.
+
+    # Reference A -- the wire against its NEIGHBOURS in the same run and layer.
+    # Independent of anything computed from the wire's own history, so it is
+    # built first and used to anchor reference B.
+    df["lay_med"] = df.groupby(["run", "layer_number"]).value.transform("median")
+    df["rel_to_layer"] = df.value / df.lay_med
+
+    # How bright the run was overall, from the layer medians alone. Needed here
+    # because it is not safe to anchor a wire's norm on a run where the whole
+    # detector was barely on.
+    lm = df.groupby(["run", "layer_number"]).lay_med.first().rename("lm").reset_index()
+    lm["typ"] = lm.groupby("layer_number").lm.transform("median")
+    df = df.merge((lm.lm / lm.typ).groupby(lm.run).median().rename("brightness"),
+                  on="run", how="left")
+
+    # Reference B -- the wire against its OWN norm. That norm must be the wire's
+    # healthy level, and it is estimated only from runs where the wire reads
+    # like its layer AND the detector was running at a normal level.
+    #
+    # Both conditions matter. Taking the median over a wire's whole history puts
+    # the norm of a wire broken for a large share of the campaign between its
+    # dead and healthy levels, so its GOOD runs read about 2x the norm and are
+    # flagged hot. Allowing dim runs into the estimate does the same thing by a
+    # different route, since a weak wire most resembles its neighbours exactly
+    # when everything is compressed.
+    #
+    # A wire with too few such runs gets no norm at all: `cv` is left undefined
+    # and the wire is judged on `rel_to_layer` alone. If its normal level was
+    # never observed, no honest statement about "changed from normal" exists.
+    healthy = df.rel_to_layer.between(dead_frac, hot_frac) & (df.brightness > min_brightness)
+    agg = (df[healthy].groupby(["layer_number", "wire"])
+           .agg(wm=("value", "median"), n_healthy=("value", "size")).reset_index())
+    norm = (df[["layer_number", "wire"]].drop_duplicates()
+            .merge(agg, on=["layer_number", "wire"], how="left"))
+    norm["n_healthy"] = norm.n_healthy.fillna(0).astype(int)
+    norm["wire_med"] = np.where(norm.n_healthy >= min_healthy, norm.wm, np.nan)
+    no_norm = norm[norm.wire_med.isna()]
+    if len(no_norm):
+        wires = ", ".join(f"L{int(r.layer_number)}W{int(r.wire)}" for _, r in no_norm.iterrows())
+        print(f"note: {len(no_norm)} wire(s) never show {min_healthy} runs at a normal level "
+              f"while resembling their layer, so no own-norm can be estimated and `cv` is "
+              f"undefined for them; they are judged on rel_to_layer alone: {wires}")
+    df = df.merge(norm[["layer_number", "wire", "wire_med", "n_healthy"]],
+                  on=["layer_number", "wire"], how="left")
+
     df["rel"] = np.where(df.wire_med > 0, df.value / df.wire_med.where(df.wire_med > 0), np.nan)
     key = ["run", "layer_number"] if per_layer else ["run"]
     df["gain"] = df.groupby(key).rel.transform("median")
     df["cv"] = df.rel / df.gain
-
-    # Second, independent reference: the wire against its NEIGHBOURS in the same
-    # run and layer. `cv` is normalized to each wire's own median and is
-    # therefore blind to a wire that is weak in every run -- such a wire reads
-    # cv ~ 1, normal for itself. Comparing with the other wires of the layer,
-    # in the same run, is what sees it. Both references are per-run, so both
-    # verdicts are statements about the run in front of you.
-    df["lay_med"] = df.groupby(["run", "layer_number"]).value.transform("median")
-    df["rel_to_layer"] = df.value / df.lay_med
-    return df
+    return df.sort_values(["layer_number", "wire", "run"]).reset_index(drop=True)
 
 
 def mark_run_quality(df, min_gain=0.1, max_gain=10.0):
@@ -215,19 +265,25 @@ def detect_wire(g, window=11, threshold=5.0, dead_frac=0.5, hot_frac=2.0,
                  .median().bfill().ffill())
     # 2. detrended: residual after removing slow drift
     detrended = cv - local_med.to_numpy()
-    # 3. MAD -> 4. scale: robust sigma of the residuals, floored at min_scale
-    mad = np.nanmedian(np.abs(detrended - np.nanmedian(detrended)))
-    scale = max(1.4826 * mad, min_scale)
+    # 3. MAD -> 4. scale: robust sigma of the residuals, floored at min_scale.
+    # A wire with no estimable norm has cv undefined throughout; leave its
+    # robust_z undefined too rather than inventing a scale for it.
+    if np.isfinite(detrended).any():
+        mad = np.nanmedian(np.abs(detrended - np.nanmedian(detrended)))
+        scale = max(1.4826 * mad, min_scale)
+    else:
+        scale = np.nan
     # 5. robust_z: how many robust sigmas from the local baseline
     robust_z = detrended / scale
 
     rl = g["rel_to_layer"].to_numpy(dtype=float)
 
-    low_own = cv < dead_frac            # dropped against its own norm
-    hot_own = cv > hot_frac
+    has_cv = np.isfinite(cv)            # false for a wire with no estimable norm
+    low_own = has_cv & (cv < dead_frac)  # dropped against its own norm
+    hot_own = has_cv & (cv > hot_frac)
     low_lay = rl < dead_frac            # weak against its neighbours this run
     hot_lay = rl > hot_frac
-    is_outlier = np.abs(robust_z) > threshold
+    is_outlier = has_cv & (np.abs(robust_z) > threshold)
 
     flag = low_own | hot_own | low_lay | hot_lay | is_outlier
     # Precedence, most specific first. `low/dead` means the wire dropped from
@@ -242,7 +298,7 @@ def detect_wire(g, window=11, threshold=5.0, dead_frac=0.5, hot_frac=2.0,
     g["local_median"] = local_med.to_numpy()
     g["robust_z"] = robust_z
     g["scale"] = scale
-    g["flag"] = flag & np.isfinite(cv)
+    g["flag"] = flag
     g["status"] = status
     return g
 
@@ -680,6 +736,10 @@ def main():
                     help="scan all wires; write flagged runs here")
     ap.add_argument("--run", type=int, metavar="N",
                     help="per-run report: layer-vs-wire map, per-layer panels, bad-channel table")
+    ap.add_argument("--min-healthy", type=int, default=20,
+                    help="runs needed to estimate a wire's norm; below this cv is undefined (default 20)")
+    ap.add_argument("--min-brightness", type=float, default=0.5,
+                    help="only runs at least this bright are used to estimate a norm (default 0.5)")
     ap.add_argument("--margin", type=float, default=1.3,
                     help="also list channels within this factor of a cut (default 1.3)")
     ap.add_argument("--run-prefix", metavar="STR",
@@ -712,7 +772,10 @@ def main():
           f"{df.groupby(['layer_number','wire']).ngroups} wires, "
           f"runs {df.run.min()}-{df.run.max()}")
 
-    df = add_normalization(df, per_layer=not args.global_gain)
+    df = add_normalization(df, per_layer=not args.global_gain,
+                           dead_frac=args.dead_frac, hot_frac=args.hot_frac,
+                           min_healthy=args.min_healthy,
+                           min_brightness=args.min_brightness)
     if args.no_run_norm:
         df["gain"] = 1.0
         df["cv"] = df.rel
