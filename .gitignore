@@ -9,3 +9,14 @@ venv/
 
 # macOS
 .DS_Store
+
+# Generated output. All of it is reproducible from all.csv in a few seconds;
+# examples/ is committed deliberately and is re-included at the end.
+*.png
+flagged.csv
+alert_adc_flagged.csv
+segments.csv
+bad_per_run.csv
+run*_bad.csv
+!examples/
+!examples/**
