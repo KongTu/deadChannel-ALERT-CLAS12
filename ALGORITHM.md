@@ -75,59 +75,71 @@ would be a 7σ excursion.
 
 ---
 
-## Step 3 — one cut on the absolute level, per wire
+## Step 3 — compare the wire with its neighbours, in the same run
 
-Step 2 cannot see a wire that has been dead since before the first run. `cv` is
-normalized to that wire's *own* median, so a permanently dead wire reads `cv ≈ 1` —
+Step 2 cannot see a wire that was already weak before the first run. `cv` is normalized
+to that wire's *own* median, so a wire that has always been weak reads `cv ≈ 1` —
 perfectly normal, for itself.
 
-The fix is to compare the wire with its neighbours in the same layer instead:
+The second reference is the rest of the layer, in the same run:
 
 ```
-rel_to_layer = wire_med / (median wire_med of the same layer)
+rel_to_layer = value / (median value of the wires of that layer, in that run)
 ```
 
 | verdict | rule |
 |---|---|
-| `always low` | `rel_to_layer < 0.5` |
-| `always hot` | `rel_to_layer > 2.0` |
+| `low vs layer` | `rel_to_layer < 0.5` |
+| `hot vs layer` | `rel_to_layer > 2.0` |
 
 **Worked example — layer 1 wire 46, run 22603:**
 `value` 0.496, `wire_med` 0.533 → `cv` 0.940. Step 2 sees nothing wrong.
-But a typical layer-1 wire has a median of 2.19, so `rel_to_layer = 0.24`. This wire has
-been delivering a quarter of its neighbours' charge all campaign. **`always low`.**
+But the median layer-1 wire reads 2.160 in that run, so `rel_to_layer = 0.23`. This wire
+is delivering under a quarter of what its neighbours deliver, right now. **`low vs layer`.**
 
-The comparison is made *within a layer* because the layers genuinely differ:
+The comparison is made *within a layer* because the layers genuinely differ — the median
+wire of layer 1 delivers about three times that of layer 7:
 
 | layer | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|---|---|---|---|
-| typical wire median | 2.19 | 1.58 | 1.50 | 1.25 | 1.21 | 1.10 | 0.67 | 0.73 |
+| median wire, run 22603 | 2.16 | 1.62 | 1.53 | 1.32 | 1.28 | 1.20 | 0.65 | 0.70 |
 
-Seven wires qualify: L1 W46, L2 W54, L2 W55, L3 W56, L4 W67, L5 W5, L6 W61. They are
-reported as bad in **every** run — because they are.
+Note this cut needs no gain correction: in a dim run both the wire and its layer fall
+together, so the ratio is unchanged. Layer 1 wire 1 reads `rel_to_layer` 0.97 in run
+22603 and 0.99 in run 22897, where the detector was at 28 % of normal.
+
+**Everything is per run.** A wire is judged on the run in front of you, never on a
+campaign-wide verdict stamped onto every run. A wire weak in 90 % of runs is flagged in
+those runs and not in the other 10 %. Over the whole campaign only three wires are below
+half their layer in more than half of all runs — L1 W46, L2 W55 and L3 W56.
 
 ---
 
 ## Putting it together
 
-Four channels of run 22603, side by side:
+Five channels of run 22603, side by side:
 
 | channel | `cv` | `rel_to_layer` | verdict | why |
 |---|---|---|---|---|
-| L1 W1 | 0.98 | 0.99 | — | normal on both references |
-| L1 W19 | **0.26** | 1.01 | `low/dead` | fine historically, dead in this run |
-| L4 W39 | **2.08** | 0.52 | `hot` | over twice its own normal here |
-| L1 W46 | 0.94 | **0.24** | `always low` | normal for itself, but its "itself" is a quarter of the layer |
+| L1 W1 | 0.98 | 0.97 | — | normal on both references |
+| L1 W19 | **0.26** | **0.26** | `low/dead` | healthy historically, dead in this run |
+| L4 W39 | **2.08** | 1.05 | `hot` | twice its own normal, though not unusual for the layer |
+| L1 W46 | 0.94 | **0.23** | `low vs layer` | normal for itself, but its "itself" is a quarter of the layer |
+| L4 W67 | 1.41 | 0.52 | — | just above the cut; listed as near-threshold |
 
-Run 22603 gives **14 bad channels of 576**: 6 `low/dead`, 1 `hot`, 7 `always low`.
+Run 22603 gives **13 bad channels of 576**: 6 `low/dead`, 6 `low vs layer`, 1 `hot`.
 
 ```bash
 python analyze_alert_adc.py all.csv --run 22603
 ```
 
-The `status` column in every output carries one of these five verdicts. The two
-thresholds that matter most are `--dead-frac` (0.5) and `--hot-frac` (2.0); they move the
-step-2 and step-3 cuts together.
+The `status` column in every output carries one of five verdicts: `low/dead`,
+`low vs layer`, `hot`, `hot vs layer`, `outlier`. The two thresholds that matter most are
+`--dead-frac` (0.5) and `--hot-frac` (2.0); they move the step-2 and step-3 cuts together.
+
+A threshold is a line drawn through a continuum, so the report also lists channels that
+came within 30 % of a cut without firing — 12 of them in run 22603, including L4 W67 at
+0.52. Adjust with `--margin`.
 
 ---
 
@@ -141,3 +153,7 @@ against nearby runs the whole chamber looks dead. Step 1 removes it.
 **A wire that was never alive.** Any method that asks "has this wire changed?" is blind to
 a wire that has always been broken — it never changed. Step 3 asks "is this wire like its
 neighbours?" instead.
+
+Both questions are asked run by run, which is the third thing this avoids: a wire that is
+weak for part of the campaign is reported bad in the runs where it is weak, and left
+alone in the runs where it is fine.

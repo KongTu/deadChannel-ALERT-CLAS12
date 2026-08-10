@@ -59,20 +59,24 @@ absolute deviation) as the scale, floored at --min-scale (default 0.05 in cv
 units): a wire reproducible to 0.4 % should not be called anomalous for a 3 %
 wiggle.
 
-Step 3 -- one per-wire cut, on the absolute level
--------------------------------------------------
-  always low / always hot : the wire's all-run median, divided by that of the
-                            median wire in the SAME layer, outside
-                            [dead_frac, hot_frac]
+Step 3 -- two more cuts, against the wire's neighbours
+------------------------------------------------------
+  low vs layer / hot vs layer : rel_to_layer outside [dead_frac, hot_frac],
+                                where
+                                rel_to_layer = value / (median value of the
+                                wires of the same layer, IN THE SAME RUN)
 
-`cv` is normalized to each wire's own median and so is structurally blind to a
-wire that is low in EVERY run: such a wire reads cv ~ 1, normal for itself. The
+`cv` is normalized to each wire's own median and so is blind to a wire that is
+weak in every run: such a wire reads cv ~ 1, normal for itself. Comparing it
+with the other wires of its layer, in the same run, is what sees it. The
 comparison is made per layer because the absolute level differs by a factor of
-about 3 between layer 1 and layer 7. These wires are reported as bad in every
-run, which is what a per-run dead-channel list has to contain.
+about 3 between layer 1 and layer 7.
 
-The `status` column carries the verdict: `low/dead`, `hot`, `outlier`,
-`always low` or `always hot`.
+Both references are evaluated run by run, so every verdict is a statement about
+the run in front of you rather than about the campaign as a whole.
+
+The `status` column carries the verdict, most specific first: `low/dead`,
+`low vs layer`, `hot`, `hot vs layer`, `outlier`.
 
 Examples
 --------
@@ -149,12 +153,21 @@ def add_normalization(df, per_layer=True):
     """
     df = df.copy()
     df["wire_med"] = df.groupby(["layer_number", "wire"]).value.transform("median")
-    # A wire that is dead in every single run has wire_med == 0; `rel` is then
-    # undefined. Those wires are caught separately as `permanently_low`.
+    # A wire dead in every single run would have wire_med == 0, leaving `rel`
+    # undefined; the rel_to_layer cut below is what catches those.
     df["rel"] = np.where(df.wire_med > 0, df.value / df.wire_med.where(df.wire_med > 0), np.nan)
     key = ["run", "layer_number"] if per_layer else ["run"]
     df["gain"] = df.groupby(key).rel.transform("median")
     df["cv"] = df.rel / df.gain
+
+    # Second, independent reference: the wire against its NEIGHBOURS in the same
+    # run and layer. `cv` is normalized to each wire's own median and is
+    # therefore blind to a wire that is weak in every run -- such a wire reads
+    # cv ~ 1, normal for itself. Comparing with the other wires of the layer,
+    # in the same run, is what sees it. Both references are per-run, so both
+    # verdicts are statements about the run in front of you.
+    df["lay_med"] = df.groupby(["run", "layer_number"]).value.transform("median")
+    df["rel_to_layer"] = df.value / df.lay_med
     return df
 
 
@@ -180,10 +193,19 @@ def mark_run_quality(df, min_gain=0.1, max_gain=10.0):
 
 def detect_wire(g, window=11, threshold=5.0, dead_frac=0.5, hot_frac=2.0,
                 min_scale=0.05):
-    """Flag anomalous runs for ONE wire's time-ordered series of cv.
+    """Flag the bad runs of ONE wire, from its time-ordered series.
+
+    Every cut is a statement about a single run. Two independent references:
+
+      cv           -- the wire against its OWN norm, run-scale divided out.
+                      Catches a wire that has changed.
+      rel_to_layer -- the wire against the other wires of its layer, in the
+                      SAME run. Catches a wire that is weak however long it has
+                      been weak, which `cv` cannot see because it is normalized
+                      to that same wire.
 
     Returns a copy of g with the analysis columns added. `g` must already have
-    the `cv` column from add_normalization().
+    `cv` and `rel_to_layer` from add_normalization().
     """
     g = g.sort_values("run").copy()
     cv = g["cv"].to_numpy(dtype=float)
@@ -199,60 +221,38 @@ def detect_wire(g, window=11, threshold=5.0, dead_frac=0.5, hot_frac=2.0,
     # 5. robust_z: how many robust sigmas from the local baseline
     robust_z = detrended / scale
 
-    is_low = cv < dead_frac
-    is_hot = cv > hot_frac
+    rl = g["rel_to_layer"].to_numpy(dtype=float)
+
+    low_own = cv < dead_frac            # dropped against its own norm
+    hot_own = cv > hot_frac
+    low_lay = rl < dead_frac            # weak against its neighbours this run
+    hot_lay = rl > hot_frac
     is_outlier = np.abs(robust_z) > threshold
-    flag = is_low | is_hot | is_outlier
-    # precedence: an absolute verdict beats a local one
-    reason = np.where(is_low, "low/dead",
-                      np.where(is_hot, "hot",
-                               np.where(is_outlier, "outlier", "")))
+
+    flag = low_own | hot_own | low_lay | hot_lay | is_outlier
+    # Precedence, most specific first. `low/dead` means the wire dropped from
+    # its own norm; `low vs layer` means it reads normally for itself but its
+    # "itself" is well below the rest of the layer.
+    status = np.where(low_own, "low/dead",
+                      np.where(low_lay, "low vs layer",
+                               np.where(hot_own, "hot",
+                                        np.where(hot_lay, "hot vs layer",
+                                                 np.where(is_outlier, "outlier", "")))))
 
     g["local_median"] = local_med.to_numpy()
     g["robust_z"] = robust_z
     g["scale"] = scale
     g["flag"] = flag & np.isfinite(cv)
-    g["reason"] = reason
+    g["status"] = status
     return g
-
-
-def add_chronic(res, dead_frac=0.5, hot_frac=2.0):
-    """Mark wires that are low (or high) in essentially EVERY run.
-
-    `cv` is normalized to each wire's own median, so it is structurally blind to
-    this case: a wire that has been dead all campaign has cv ~ 1 and looks
-    perfectly normal relative to itself. Such a wire is nevertheless dead in
-    every run, and a per-run dead-channel list has to contain it.
-
-    The comparison is absolute and made against the median wire in the SAME
-    layer, because the level differs by a factor of ~3 between layer 1 and 7.
-    """
-    wm = (res.groupby(["layer_number", "wire"]).value.median()
-          .rename("wire_median").reset_index())
-    wm["layer_typical"] = wm.groupby("layer_number").wire_median.transform("median")
-    wm["rel_to_layer"] = wm.wire_median / wm.layer_typical
-    wm["chronic"] = np.where(wm.rel_to_layer < dead_frac, "always low",
-                             np.where(wm.rel_to_layer > hot_frac, "always hot", ""))
-    res = res.merge(wm[["layer_number", "wire", "rel_to_layer", "chronic"]],
-                    on=["layer_number", "wire"], how="left")
-    res["flag"] = res.flag | (res.chronic != "")
-    # `reason` stays the per-run verdict; `status` is what to report
-    res["status"] = np.where(res.chronic != "", res.chronic, res.reason)
-    n = int((wm.chronic != "").sum())
-    if n:
-        print(f"note: {n} wire(s) are outside [{dead_frac:g}, {hot_frac:g}] x the typical "
-              f"wire of their layer in essentially every run; they are reported as bad "
-              f"in every run")
-    return res
 
 
 def detect_all(df, window=11, threshold=5.0, dead_frac=0.5, hot_frac=2.0,
                min_scale=0.05):
-    """Run detect_wire over every wire, then add the chronic (all-run) verdict."""
+    """Run detect_wire over every wire."""
     parts = [detect_wire(g, window, threshold, dead_frac, hot_frac, min_scale)
              for _, g in df.groupby(["layer_number", "wire"])]
-    res = pd.concat(parts, ignore_index=True)
-    return add_chronic(res, dead_frac, hot_frac)
+    return pd.concat(parts, ignore_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -294,7 +294,8 @@ def plot_wire(res, layer, wire, dead_frac, hot_frac, outpath):
     plt.close(fig)
     print(f"wrote {outpath}  ({len(fl)} flagged of {len(g)} runs)")
     if not fl.empty:
-        print(fl[["run", "value", "cv", "robust_z", "reason"]].to_string(index=False))
+        print(fl[["run", "value", "cv", "rel_to_layer", "robust_z", "status"]]
+              .to_string(index=False))
 
 
 # --------------------------------------------------------------------------
@@ -340,18 +341,20 @@ def plot_run_map(res, run, dead_frac, hot_frac, outpath):
                          norm=TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=2.0))
     fig.colorbar(im1, ax=axes[1], pad=0.01,
                  label="cv  (1 = normal, 0 = dead, 2 = hot)")
-    per_run = bad[bad.chronic == ""] if "chronic" in bad.columns else bad
-    chronic = bad[bad.chronic != ""] if "chronic" in bad.columns else bad.iloc[0:0]
+    vs_own = bad[bad.status.isin(["low/dead", "hot", "outlier"])]
+    vs_lay = bad[bad.status.isin(["low vs layer", "hot vs layer"])]
     axes[1].set_title(f"run-normalized: {len(bad)} bad channel(s) — "
-                      f"{len(per_run)} bad in this run (low<{dead_frac:g}, hot>{hot_frac:g}), "
-                      f"{len(chronic)} bad in every run")
-    if not per_run.empty:
-        axes[1].scatter(per_run.wire, per_run.layer_number, s=150, facecolors="none",
-                        edgecolors="magenta", linewidths=2.0, label="bad in this run")
-    if not chronic.empty:
-        axes[1].scatter(chronic.wire, chronic.layer_number, s=150, facecolors="none",
+                      f"{len(vs_own)} against their own norm, "
+                      f"{len(vs_lay)} against their layer  "
+                      f"(low<{dead_frac:g}, hot>{hot_frac:g})")
+    if not vs_own.empty:
+        axes[1].scatter(vs_own.wire, vs_own.layer_number, s=150, facecolors="none",
+                        edgecolors="magenta", linewidths=2.0,
+                        label="bad vs its own norm")
+    if not vs_lay.empty:
+        axes[1].scatter(vs_lay.wire, vs_lay.layer_number, s=150, facecolors="none",
                         edgecolors="black", linewidths=2.0, linestyle="--",
-                        label="bad in every run")
+                        label="bad vs its layer")
     if not bad.empty:
         axes[1].legend(loc="upper right", fontsize=8, framealpha=0.9)
 
@@ -381,13 +384,13 @@ def plot_run_panels(res, run, dead_frac, hot_frac, outpath):
                              low the whole campaign, which `cv` cannot see
                              because it is normalized to that same wire.
 
-    A chronically dead wire sits at cv ~ 1 (normal for itself) but low on the
-    grey series, so its marker belongs on the grey one.
+    A wire that is weak in every run sits at cv ~ 1 (normal for itself) but low
+    on the grey series, so its marker belongs on the grey one.
     """
     g = res[res.run == run]
     if g.empty:
         return
-    has_chronic = "chronic" in g.columns
+    has_layer = "rel_to_layer" in g.columns
     fig, axes = plt.subplots(8, 1, figsize=(12, 13.5), sharex=True)
     for i, ax in enumerate(axes, start=1):
         gl = g[g.layer_number == i].sort_values("wire")
@@ -396,26 +399,26 @@ def plot_run_panels(res, run, dead_frac, hot_frac, outpath):
         ax.axhspan(hot_frac, top, color="magenta", alpha=0.07)
         ax.axhline(1.0, color="0.5", lw=0.8)
 
-        if has_chronic:
+        if has_layer:
             ax.plot(gl.wire, gl.rel_to_layer, "-", color="0.85", lw=0.7, zorder=1)
             ax.scatter(gl.wire, gl.rel_to_layer, s=8, color="0.62", marker="s",
-                       zorder=2, label="wire median vs typical wire of this layer")
+                       zorder=2, label="rel_to_layer: this wire vs its layer, this run")
         ax.plot(gl.wire, gl.cv, "-", color="0.8", lw=0.8, zorder=3)
         ax.scatter(gl.wire, gl.cv, s=12, color="steelblue", zorder=4,
                    label="cv: this run vs the wire's own norm")
 
-        per_run = gl[gl.flag & (gl.chronic == "")] if has_chronic else gl[gl.flag]
-        chronic = gl[gl.chronic != ""] if has_chronic else gl.iloc[0:0]
+        per_run = gl[gl.status.isin(["low/dead", "hot", "outlier"])]
+        chronic = gl[gl.status.isin(["low vs layer", "hot vs layer"])]
         if not per_run.empty:
             ax.scatter(per_run.wire, per_run.cv, s=80, facecolors="none",
-                       edgecolors="red", lw=1.6, zorder=5, label="bad in this run")
+                       edgecolors="red", lw=1.6, zorder=5, label="bad vs its own norm")
             for _, r in per_run.iterrows():
                 ax.annotate(int(r.wire), (r.wire, r.cv), textcoords="offset points",
                             xytext=(0, 7), ha="center", fontsize=7, color="red")
         if not chronic.empty:
             ax.scatter(chronic.wire, chronic.rel_to_layer, s=80, facecolors="none",
                        edgecolors="black", lw=1.6, linestyle="--", zorder=5,
-                       label="bad in every run")
+                       label="bad vs its layer")
             for _, r in chronic.iterrows():
                 ax.annotate(int(r.wire), (r.wire, r.rel_to_layer),
                             textcoords="offset points", xytext=(0, -13),
@@ -442,7 +445,7 @@ def plot_run_panels(res, run, dead_frac, hot_frac, outpath):
     print(f"wrote {outpath}")
 
 
-def run_report(res, run, dead_frac, hot_frac, prefix):
+def run_report(res, run, dead_frac, hot_frac, prefix, margin=1.3):
     bad = plot_run_map(res, run, dead_frac, hot_frac, f"{prefix}_map.png")
     if bad is None:
         return
@@ -458,14 +461,28 @@ def run_report(res, run, dead_frac, hot_frac, prefix):
               f"(gain={res[res.run == run].gain.median():.3f}); "
               f"treat its bad-channel list with care")
     print(f"\nBad channels in run {run}: {len(tab)} of {len(res[res.run == run])}")
+    fmt = {"value": "{:.4f}".format, "wire_med": "{:.4f}".format,
+           "gain": "{:.3f}".format, "cv": "{:.3f}".format,
+           "rel_to_layer": "{:.2f}".format, "robust_z": "{:.1f}".format}
     if not tab.empty:
-        print(tab.to_string(index=False,
-                            formatters={"value": "{:.4f}".format,
-                                        "wire_med": "{:.4f}".format,
-                                        "gain": "{:.3f}".format,
-                                        "cv": "{:.3f}".format,
-                                        "rel_to_layer": "{:.2f}".format,
-                                        "robust_z": "{:.1f}".format}))
+        print(tab.to_string(index=False, formatters=fmt))
+
+    # Channels that came close to a cut without firing. A threshold is a line
+    # drawn through a continuum, so the entries just the wrong side of it are
+    # worth seeing before trusting the count.
+    g = res[res.run == run]
+    near = g[(~g.flag)
+             & (((g.cv > dead_frac) & (g.cv < dead_frac * margin))
+                | ((g.rel_to_layer > dead_frac) & (g.rel_to_layer < dead_frac * margin))
+                | ((g.cv < hot_frac) & (g.cv > hot_frac / margin))
+                | ((g.rel_to_layer < hot_frac) & (g.rel_to_layer > hot_frac / margin)))]
+    if not near.empty:
+        near = near.sort_values("rel_to_layer")
+        print(f"\nNot flagged, but within {100*(margin-1):.0f} % of a cut "
+              f"({len(near)} channel(s)):")
+        print(near[[c for c in cols if c in near.columns]]
+              .sort_values(["layer_number", "wire"])
+              .to_string(index=False, formatters=fmt))
 
 
 # --------------------------------------------------------------------------
@@ -474,9 +491,10 @@ def run_report(res, run, dead_frac, hot_frac, prefix):
 def plot_summary(res, outpath, csv_path=None):
     per = (res.groupby("run")
            .agg(n_bad=("flag", "sum"),
-                n_chronic=("status", lambda s: s.str.startswith("always").sum()),
                 n_low=("status", lambda s: (s == "low/dead").sum()),
+                n_low_layer=("status", lambda s: (s == "low vs layer").sum()),
                 n_hot=("status", lambda s: (s == "hot").sum()),
+                n_hot_layer=("status", lambda s: (s == "hot vs layer").sum()),
                 n_outlier=("status", lambda s: (s == "outlier").sum()),
                 gain=("gain", "median"),
                 run_ok=("run_ok", "first") if "run_ok" in res.columns else ("flag", "size"),
@@ -492,10 +510,10 @@ def plot_summary(res, outpath, csv_path=None):
         ax0.plot([], [], color="0.85", lw=6, label="run reads far from normal level")
     ax0.plot(per.run, per.n_bad, "-", color="0.8", lw=0.8, zorder=1)
     ax0.scatter(per.run, per.n_bad, s=9, color="firebrick", zorder=2, label="all bad")
-    ax0.plot(per.run, per.n_low, lw=1, color="steelblue", label="low/dead in this run")
-    ax0.plot(per.run, per.n_hot, lw=1, color="magenta", label="hot in this run")
-    ax0.plot(per.run, per.n_chronic, lw=1.2, color="black", ls="--",
-             label="bad in every run")
+    ax0.plot(per.run, per.n_low, lw=1, color="steelblue", label="low vs its own norm")
+    ax0.plot(per.run, per.n_hot, lw=1, color="magenta", label="hot vs its own norm")
+    ax0.plot(per.run, per.n_low_layer, lw=1.2, color="black", ls="--",
+             label="low vs its layer")
     ax0.set_ylabel("bad channels in the run")
     ax0.set_title("AHDC: number of bad channels per run "
                   f"({per.run.min()}-{per.run.max()}, {len(per)} runs, 576 wires)")
@@ -630,22 +648,23 @@ def scan_all(res, dead_frac, hot_frac, out_csv):
                .agg(n_runs=("run", "size"),
                     n_flagged=("flag", "sum"),
                     median_value=("value", "median"),
-                    rel_to_layer=("rel_to_layer", "first"),
-                    chronic=("chronic", "first"))
+                    median_rel_to_layer=("rel_to_layer", "median"),
+                    n_low_layer=("status", lambda s: (s == "low vs layer").sum()))
                .reset_index())
     summary["frac_flagged"] = summary.n_flagged / summary.n_runs
+    summary["frac_low_layer"] = summary.n_low_layer / summary.n_runs
 
-    chron = summary[summary.chronic != ""]
-    print(f"\nwires outside [{dead_frac:g}, {hot_frac:g}] x their layer's typical wire in "
-          f"essentially every run: {len(chron)}")
-    if not chron.empty:
-        print(chron.sort_values("rel_to_layer")
-              [["layer_number", "wire", "n_runs", "median_value", "rel_to_layer", "chronic"]]
+    weak = summary[summary.frac_low_layer > 0.5].sort_values("median_rel_to_layer")
+    print(f"\nwires below {dead_frac:g} x their layer in more than half of all runs: {len(weak)}")
+    if not weak.empty:
+        print(weak[["layer_number", "wire", "n_runs", "median_value",
+                    "median_rel_to_layer", "frac_low_layer"]]
               .to_string(index=False, formatters={"median_value": "{:.4f}".format,
-                                                  "rel_to_layer": "{:.2f}".format}))
+                                                  "median_rel_to_layer": "{:.2f}".format,
+                                                  "frac_low_layer": "{:.2f}".format}))
 
-    worst = summary[summary.chronic == ""].sort_values("frac_flagged", ascending=False).head(15)
-    print("\nWires most often bad in a single run (chronic wires excluded, top 15):")
+    worst = summary.sort_values("frac_flagged", ascending=False).head(15)
+    print("\nWires bad in the largest fraction of runs (top 15):")
     print(worst.to_string(index=False))
     return flagged, summary
 
@@ -661,6 +680,8 @@ def main():
                     help="scan all wires; write flagged runs here")
     ap.add_argument("--run", type=int, metavar="N",
                     help="per-run report: layer-vs-wire map, per-layer panels, bad-channel table")
+    ap.add_argument("--margin", type=float, default=1.3,
+                    help="also list channels within this factor of a cut (default 1.3)")
     ap.add_argument("--run-prefix", metavar="STR",
                     help="output prefix for --run (default run<N>)")
     ap.add_argument("--summary", metavar="PNG", nargs="?", const="bad_per_run.png",
@@ -711,7 +732,7 @@ def main():
         did = True
     if args.run is not None:
         run_report(res, args.run, args.dead_frac, args.hot_frac,
-                   args.run_prefix or f"run{args.run}")
+                   args.run_prefix or f"run{args.run}", args.margin)
         did = True
     if args.summary is not None:
         plot_summary(res, args.summary, args.summary_csv)
