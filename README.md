@@ -3,8 +3,8 @@
 Service task for CLAS12: find **dead / bad AHDC wires** in the ALERT detector from each
 wire's ADC (analogue-to-digital converter) value as a function of run number.
 
-> **New here?** [ALGORITHM.md](ALGORITHM.md) explains how a channel gets called bad in
-> one page, with worked numbers. This README is the full reference.
+> **How the method works** is in [ALGORITHM.md](ALGORITHM.md), one page with worked
+> numbers. This README covers installing and running the code.
 
 The AHDC (ALERT Hyper Drift Chamber) has **8 layers** with wire counts
 `{47, 56, 56, 72, 72, 87, 87, 99}` = **576 wires** total. For every run, the CLAS12
@@ -41,7 +41,7 @@ format used throughout CLAS12. `dump_alert_adc_csv.groovy` dumps them to CSV;
 |------|------------|
 | `dump_alert_adc_csv.groovy` | Reads the deployed ALERT ADC timeline HIPO files (input: clas12mon URL or a directory of timeline `.hipo` files) and writes the per-wire CSV. Runs on the JLab `ifarm`. |
 | `analyze_alert_adc.py` | Command-line tool: per-run maps and tables, bad channels per run, run-range segmentation, single-wire plots, full scan. |
-| `analyze_alert_adc.ipynb` | The same analysis as a notebook, with the method written out. It imports the module, so the two cannot disagree. |
+| `analyze_alert_adc.ipynb` | The same analysis as a notebook. It imports the module, so the two cannot disagree. |
 | `ALGORITHM.md` | One-page guide to how a channel gets called bad, with worked numbers. |
 | `all.csv` | Full dataset — 576 wires × 1112 runs (runs 21317–23061). |
 | `test.csv` | Smaller subset (57 wires: layer 1, plus the first 10 wires of layer 2) for quick tests. |
@@ -194,8 +194,8 @@ With no mode option at all, the tool performs a full scan.
 
 ### Sensitivity
 
-`--dead-frac` and `--hot-frac` move the per-run cut and the per-wire cut together, so
-scanning them tells you how firm the answer is:
+`--dead-frac` and `--hot-frac` move both references together, so scanning them tells you
+how firm the answer is:
 
 ```bash
 # a channel must fall below 40 % of normal to count as dead -> fewer channels
@@ -213,8 +213,8 @@ Raising `--dead-frac` flags more channels, lowering it flags fewer.
 
 Open `analyze_alert_adc.ipynb` in `jupyter lab`, set `CSV_PATH` and `RUN_OF_INTEREST` in
 the setup cell, and run top to bottom. It imports `analyze_alert_adc.py`, so the notebook
-and the command line always do the same thing; the markdown sections explain the method
-and the detection function is printed from the module so it cannot go stale.
+and the command line always do the same thing. Start it from the repository folder, or the
+import will fail.
 
 ---
 
@@ -236,72 +236,9 @@ cut -d, -f6 all.csv | sort -u    # should list only ahdc_adc_... graph names
 
 ---
 
-## How a wire gets called bad
-
-Every quantity below is a ratio taken **inside a single run**, so anything that moves the
-whole detector together — beam current, gas, high voltage, thresholds, trigger composition
-— cancels. The overall level varies by more than an order of magnitude across the campaign
-and 399 of 1111 runs read below half normal, and none of it needs correcting.
-
-See [ALGORITHM.md](ALGORITHM.md) for worked examples.
-
-### The two references
-
-```
-lay_med      = median value over the wires of that layer, in that run
-rel_to_layer = value / lay_med                      <- against its neighbours
-
-own_norm     = median of rel_to_layer over the runs where the wire reads like its layer
-cv           = rel_to_layer / own_norm              <- against itself
-```
-
-`rel_to_layer` is taken per layer because the absolute level differs by a factor of about
-3 between layer 1 and layer 7. It uses no history, so it sees a wire that was already
-broken before the first run — which `cv`, normalized to the wire's own behaviour, cannot.
-
-`cv` is needed because a single threshold on `rel_to_layer` asks every wire to fall to the
-same fraction of the layer median. That suits the 90 % of wires sitting between 0.87 and
-1.10 of their layer, but not the rest: a wire normally reading 1.4× its layer can lose
-most of its output and still clear the cut.
-
-`own_norm` is estimated only from the wire's healthy-looking runs. Using its whole history
-would put the norm of a mostly-broken wire between its dead and healthy levels, and that
-wire's *good* runs would then read about twice the norm and be flagged hot. A wire with
-fewer than `--min-healthy` (default 20) such runs gets no `own_norm`; `cv` is undefined
-and it is judged on `rel_to_layer` alone.
-
-### The five cuts
-
-An entry is flagged if any cut fires; `status` records which, most specific first.
-
-| verdict | rule |
-|---|---|
-| `low/dead` | `cv < dead_frac` (0.5) |
-| `low vs layer` | `rel_to_layer < dead_frac` |
-| `hot` | `cv > hot_frac` (2.0) |
-| `hot vs layer` | `rel_to_layer > hot_frac` |
-| `outlier` | `\|robust_z\| > threshold` (5) |
-
-`robust_z = (cv − local_median) / scale` catches a sharp change relative to the same wire
-in adjacent runs, even when it stays inside both absolute bands. `local_median` is a
-centered rolling median over `--window` runs; `scale` is `1.4826 × MAD` (median absolute
-deviation, the robust equivalent of a standard deviation) floored at `--min-scale`,
-because a wire reproduces to about 0.4 % and a 3 % wiggle should not count as anomalous.
-
-The per-run report also lists channels within `--margin` (default 1.3) of a cut without
-firing — 7 of them in run 22603.
-
-### Run quality
-
-`brightness` is a run's overall level relative to the campaign, from the layer medians. It
-takes no part in the cuts. It only marks runs where the detector was effectively off — 109
-of 1111 at the default `--min-gain 0.1` — whose values are noise rather than measurements.
-Those runs are kept but marked `run_ok = False`, shaded in the summary plot, and excluded
-when building run ranges.
-
----
-
 ## Reading the figures
+
+`cv` and `rel_to_layer` are defined in [ALGORITHM.md](ALGORITHM.md).
 
 **`run<N>_map.png`** — layer (vertical) × wire (horizontal), grey where the wire does not
 exist. Top: the raw value on a log colour scale, matching what is posted online; the
@@ -309,17 +246,16 @@ horizontal banding is the real difference between layers. Bottom: `cv`, white at
 magenta rings on channels bad against their own norm and black dashed rings on channels
 bad against their layer.
 
-**`run<N>_panels.png`** — the same run, one panel per layer. Two series, because the two
-kinds of bad channel are judged on different quantities and each marker sits on the curve
-it came from: blue dots are `cv` and carry the red rings, grey squares are `rel_to_layer`
-and carry the black dashed rings. Shaded bands mark the dead and hot regions.
+**`run<N>_panels.png`** — the same run, one panel per layer. Blue dots are `cv` and carry
+the red rings; grey squares are `rel_to_layer` and carry the black dashed rings, so each
+marker sits on the curve its verdict came from. Shaded bands mark the dead and hot regions.
 
-**`bad_per_run.png`** — bad channels per run across the campaign. Red points are the
-total; blue and magenta count channels judged against their own norm, the black dashed
-line those judged against their layer. Grey vertical bands mark runs whose overall level
-is far from normal, whose counts should not be trusted. The lower panel is the run
-brightness on a log axis. Flat stretches are stable periods; the steps between them are
-the runs worth looking up in the logbook.
+**`bad_per_run.png`** — bad channels per run. Red points are the total; blue and magenta
+count channels judged against their own norm, the black dashed line those judged against
+their layer. Grey vertical bands mark runs whose overall level is far from normal, whose
+counts should not be trusted. The lower panel is the run brightness on a log axis. Flat
+stretches are stable periods; the steps between them are the runs worth looking up in the
+logbook.
 
 **`segments_hist.png`** — how fragmented the dataset is. Left: how many consecutive runs
 a wire stays bad. Right: how many separate bad stretches each affected wire has.

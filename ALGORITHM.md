@@ -1,6 +1,6 @@
 # How a channel gets called bad
 
-One page. Full reference in [README.md](README.md).
+How to install and run the code is in [README.md](README.md).
 
 We have one number per wire per run: the ADC integral, normalized to the trigger count.
 A wire is bad if that number is wrong — but "wrong" depends on the layer, on how bright
@@ -67,6 +67,25 @@ cv      1.010  1.003  0.597  1.026  1.025
 
 No absolute cut fires at 0.597, but the wire reproduces to a fraction of a percent, so
 `robust_z = −8.5`.
+
+**Terms in that cut.** `local_median` is a centered rolling median of `cv` over `--window`
+runs — the level expected for this run given its neighbours, taken as a median so a few
+bad runs in the window do not drag it. `MAD` is the median absolute deviation of the
+residuals; a standard deviation would be inflated by a single dead run, and the inflated
+spread would then hide the very anomaly that caused it. `scale` is
+`max(1.4826 × MAD, --min-scale)` — the factor 1.4826 converts MAD to the equivalent of a
+standard deviation on clean data, and the floor exists because a wire reproduces to about
+0.4 %, so without it a 3 % wiggle would be a 7σ excursion.
+
+---
+
+## Run quality
+
+`brightness` is a run's overall level relative to the campaign, taken from the layer
+medians. It takes no part in the cuts. It marks runs where the detector was effectively
+off — 109 of 1111 at the default `--min-gain 0.1` — whose values are noise rather than
+measurements. Those runs are kept, marked `run_ok = False`, shaded in the summary plot and
+excluded when building run ranges.
 
 ---
 
