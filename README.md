@@ -73,14 +73,14 @@ run, layer_number, layer_code, wire, value, graph_name
 Output (`flagged.csv`, and `run<N>_bad.csv` without `local_median`):
 
 ```
-run, layer_number, layer_code, wire, value, wire_med, gain, cv,
-rel_to_layer, local_median, robust_z, status
+run, layer_number, layer_code, wire, value, lay_med, rel_to_layer,
+own_norm, cv, local_median, robust_z, status
 ```
 
 `bad_per_run.csv`:
 
 ```
-run, n_bad, n_low, n_low_layer, n_hot, n_hot_layer, n_outlier, gain, run_ok, n_wires
+run, n_bad, n_low, n_low_layer, n_hot, n_hot_layer, n_outlier, brightness, run_ok, n_wires
 ```
 
 `segments.csv`:
@@ -180,18 +180,15 @@ Good candidates are the run numbers where the bad-channel count steps in
 | `--layer N --wire M` | – | which wire to plot |
 | `--plot FILE.png` | auto | output plot path |
 | `--scan [FILE.csv]` | `alert_adc_flagged.csv` | scan all wires, write every bad entry |
-| `--dead-frac F` | 0.5 | flag `cv` below this, and wires below this fraction of their layer |
-| `--hot-frac F` | 2.0 | flag `cv` above this, and wires above this fraction of their layer |
+| `--dead-frac F` | 0.5 | flag `cv` below this, and `rel_to_layer` below this |
+| `--hot-frac F` | 2.0 | flag `cv` above this, and `rel_to_layer` above this |
 | `--threshold X` | 5.0 | robust-z cutoff for an `outlier` |
 | `--window N` | 11 | rolling-median window (runs) used as the local baseline |
 | `--min-scale F` | 0.05 | floor on the robust sigma, in `cv` units |
-| `--min-healthy N` | 20 | runs needed to estimate a wire's norm; below this `cv` is undefined |
-| `--min-brightness F` | 0.5 | only runs at least this bright are used to estimate a norm |
+| `--min-healthy N` | 20 | runs needed to estimate `own_norm`; below this `cv` is undefined |
 | `--margin F` | 1.3 | also list channels within this factor of a cut |
 | `--min-gain F` | 0.1 | runs dimmer than this are marked `run_ok = False` |
 | `--max-gain F` | 10 | runs brighter than this are marked `run_ok = False` |
-| `--global-gain` | off | normalize per run only, not per run *and* layer |
-| `--no-run-norm` | off | cut on the raw value instead of the run-normalized `cv` |
 
 With no mode option at all, the tool performs a full scan.
 
@@ -241,98 +238,68 @@ cut -d, -f6 all.csv | sort -u    # should list only ahdc_adc_... graph names
 
 ## How a wire gets called bad
 
-### Step 1 — put every run on a common scale
+Every quantity below is a **ratio taken inside a single run**. The overall level of the
+detector breathes from run to run by more than an order of magnitude — beam current, gas,
+high voltage, thresholds and trigger composition all move it, and 399 of 1111 runs read
+below half the campaign-typical level — but a ratio formed within one run cancels all of
+it exactly. No run-level correction is applied because none is needed.
 
-The overall ADC level of the detector breathes from run to run by large factors: beam
-current, trigger composition, gas, high voltage, thresholds and the normalization all
-move it. Across runs 21317–23061 the level spans more than an order of magnitude and
-**366 of 1111 runs read below half the campaign-typical level**.
-
-That coherent breathing is divided out before any per-wire statement is made. Judged
-against its own neighbouring runs alone, a wire in a run that is globally 6 % low sits
-many robust sigmas below its local baseline — and so does every other wire, so the whole
-detector would be flagged for a property of the run.
-
-| symbol | definition | meaning |
-|---|---|---|
-| `wire_med` | median of `value` over the wire's healthy runs at a normal detector level | the wire's own normal |
-| `rel` | `value / wire_med` | the wire relative to its own normal |
-| `gain` | median of `rel` over all wires in the same **run and layer** | how bright this run was |
-| `cv` | `rel / gain` | **what the per-run cuts act on** |
-
-`cv = 1` means the wire is at its own typical level once the run-wide and layer-wide
-scale is removed. A dead wire goes to `cv → 0`, a hot one to `cv ≫ 1`, regardless of how
-bright the run was. The gain is taken **per layer** so that a change affecting one
-superlayer does not leak into the others.
-
-**Estimating `wire_med`.** It has to be the wire's *healthy* level, so it is taken over the
-runs where the wire reads like its layer **and** the detector was at a normal level
-(`--min-brightness`, default 0.5). A plain median over a wire's whole history is wrong for
-any wire broken for a large share of the campaign: the norm lands between its dead and
-healthy levels, and its *good* runs then read about twice that norm and are flagged hot.
-Allowing dim runs into the estimate fails the same way by another route, since a weak wire
-most resembles its neighbours exactly when everything is compressed.
-
-A wire that never shows `--min-healthy` (default 20) such runs gets no norm: `cv` is left
-undefined and the wire is judged on `rel_to_layer` alone. Two wires are in that position
-over 21317–23061, L1 W46 and L2 W55. If a wire's normal level was never observed, there is
-no honest statement to make about it having changed from normal.
-
-**Runs where the detector was effectively off.** Dividing by the gain rescues a run that
-is uniformly 30 % low; it does not rescue a run with `gain ≈ 0.01`, where the values are
-consistent with noise. Those runs — 106 of 1111 at the default `--min-gain 0.1` — are
-kept but marked `run_ok = False`, shaded grey in the summary plot, and excluded when
-building run ranges, so that a few such runs scattered through a stable period do not
-chop one long segment into many short ones.
-
-### Step 2 — three per-run cuts, on `cv`
-
-An entry is flagged if any cut fires. `status` records which.
-
-**`low/dead`:** `cv < dead_frac` (default 0.5). The wire delivers less than half its own
-normal charge for this run's conditions.
-
-**`hot`:** `cv > hot_frac` (default 2.0). More than twice normal — noisy, oscillating, or
-picking up a neighbour. These show up as bright cells in the online monitoring maps and
-are worth recording alongside the dead ones.
-
-**`outlier`:** `|robust_z| > threshold` (default 5). A sharp change relative to the
-**same wire in adjacent runs**, which catches a wire changing state even while it stays
-inside the absolute bands.
-
-### Step 3 — two more cuts, against the wire's neighbours
-
-**`low vs layer` / `hot vs layer`:** `rel_to_layer` outside `[dead_frac, hot_frac]`, where
+### Reference A — the wire against its neighbours
 
 ```
-rel_to_layer = value / (median value of the wires of that layer, in that run)
+lay_med      = median value over the wires of that layer, in that run
+rel_to_layer = value / lay_med
 ```
 
-`cv` is normalized to each wire's own median and is therefore blind to a wire that is
-weak in *every* run: such a wire reads `cv ≈ 1`, perfectly normal for itself. Comparing it
-with the other wires of its layer, in the same run, is what sees it. The comparison is
-made per layer because the absolute level differs by a factor of about 3 between layer 1
-and layer 7.
+Per layer, because the absolute level differs by a factor of about 3 between layer 1 and
+layer 7. This reference uses no history at all, so it sees a wire that was already broken
+before the first run — which reference B, normalized to the wire's own behaviour, cannot.
 
-This cut needs no gain correction — in a dim run the wire and its layer fall together, so
-the ratio is unchanged. Layer 1 wire 1 reads `rel_to_layer` 0.97 in run 22603 and 0.99 in
-run 22897, where the detector was at 28 % of normal.
+### Reference B — the wire against itself
 
-**Every cut is per run.** A wire is judged on the run in front of you, never by a
-campaign-wide verdict stamped onto every run, so a wire that degrades partway through the
-campaign is flagged in the runs where it is weak and left alone in the others. Across
-21317–23061 only two wires are below half their layer in more than half of all runs:
+```
+own_norm = median of rel_to_layer over the runs where the wire reads like its layer
+cv       = rel_to_layer / own_norm
+```
 
-| wire | median `rel_to_layer` | runs below 0.5 |
-|---|---|---|
-| L1 W46 | 0.30 | 59 % |
-| L2 W55 | 0.33 | 60 % |
+`own_norm` is the wire's usual standing within its layer; `cv = 1` means it is where it
+usually sits.
 
-### Near-threshold channels
+Reference A alone is not enough. Its threshold asks every wire to fall to the same
+fraction of the layer median, which is well calibrated for a typical wire — 90 % of wires
+sit between 0.87 and 1.10 of their layer — but not for the rest. L6 W61 normally reads
+1.40× its layer; in run 22603 it falls to `cv` 0.41, having lost nearly 60 % of its
+output, while `rel_to_layer` is still 0.57 and clears the cut.
 
-A threshold is a line through a continuum, so the per-run report also lists channels that
-came within `--margin` (default 1.3, i.e. 30 %) of a cut without firing. In run 22603
-that is 6 channels, among them L4 W67 at `rel_to_layer` 0.52.
+**`own_norm` is estimated only from the wire's healthy-looking runs.** A median over its
+whole history would land between the dead and healthy levels of any wire broken for a
+large share of the campaign, and that wire's *good* runs would then read about twice the
+norm and be flagged hot. A wire with fewer than `--min-healthy` (default 20) such runs
+gets no `own_norm`: `cv` is undefined and it is judged on reference A alone.
+
+### The five cuts
+
+An entry is flagged if any cut fires; `status` records which, most specific first.
+
+| verdict | rule |
+|---|---|
+| `low/dead` | `cv < dead_frac` (0.5) |
+| `low vs layer` | `rel_to_layer < dead_frac` |
+| `hot` | `cv > hot_frac` (2.0) |
+| `hot vs layer` | `rel_to_layer > hot_frac` |
+| `outlier` | `\|robust_z\| > threshold` (5) |
+
+`robust_z` is `(cv − local_median) / scale`: a sharp change relative to the **same wire in
+adjacent runs**, catching a wire that changes state while staying inside both absolute
+bands.
+
+### Run quality
+
+`brightness` is a run's overall level relative to the campaign, taken from the layer
+medians. It plays no part in the cuts. It marks runs where the detector was effectively
+off — 109 of 1111 at the default `--min-gain 0.1` — whose values are noise rather than
+measurements. Those runs are kept but marked `run_ok = False`, shaded in the summary plot
+and excluded when building run ranges.
 
 ### Glossary
 
@@ -340,30 +307,24 @@ that is 6 channels, among them L4 W67 at `rel_to_layer` 0.52.
 expected for this run given its neighbours. A median, so a few bad runs inside the window
 do not drag the baseline.
 
-**`detrended`** — `cv − local_median`: how far this run sits from local normal.
+**`MAD`** — median absolute deviation of the residuals. The ordinary standard deviation
+*squares* deviations, so one dead run inflates it, and the inflated spread then hides the
+very anomaly that caused it.
 
-**`MAD`** — median absolute deviation of the residuals,
-`median(|detrended − median(detrended)|)`. The ordinary standard deviation *squares*
-deviations, so one dead run inflates it — and the inflated spread then hides the very
-anomaly that caused it. A median ignores extremes by construction.
+**`1.4826`** — unit conversion. For Gaussian data `MAD → 0.6745 σ`, so multiplying by
+`1/0.6745 = 1.4826` makes the estimate equal the standard deviation on clean data.
 
-**`1.4826`** — unit conversion, nothing more. For Gaussian data `MAD → 0.6745 σ`
-(0.6745 is the z-value of the 75th percentile), so multiplying by `1/0.6745 = 1.4826`
-makes the estimate equal the standard deviation on clean data.
+**`scale`** — `max(1.4826 × MAD, min_scale)`, the robust sigma with a floor. A wire
+reproduces to about 0.4 %, so without the floor a harmless 3 % wiggle is a 7σ excursion.
 
-**`scale`** — `max(1.4826 × MAD, min_scale)`: the robust sigma, with a floor. After
-normalization a typical wire reproduces to about 0.4 %, so without the floor a harmless
-3 % wiggle is a 7σ excursion and the `outlier` cut fires across the whole detector.
-`--min-scale 0.05` says "nothing counts as anomalous unless it moves by more than about
-5 % of the wire's normal level".
+**`frac_flagged`** (from `--scan`) — flagged runs / total runs, per wire. Used for ranking;
+no automatic cut is applied to it.
 
-**`robust_z`** — `detrended / scale`: robust sigmas from the local baseline. Read like an
-ordinary z-score, but built from medians so it stays honest when part of the series is bad.
+### Near-threshold channels
 
-**`frac_flagged`** (from `--scan`) — flagged runs / total runs, per wire. Used for
-ranking suspects; no automatic cut is applied to it.
-
-The tool ranks and reports; the final per-wire verdict is left to the analyst.
+A threshold is a line through a continuum, so the per-run report also lists channels within
+`--margin` (default 1.3) of a cut without firing — 7 of them in run 22603, including
+L4 W67 at `rel_to_layer` 0.52.
 
 ---
 
@@ -387,7 +348,7 @@ against the median wire of its layer in that run) and carries the black dashed
 red points for the total, blue and magenta for channels judged against their own norm,
 and a black dashed line for channels judged against their layer. Grey vertical bands mark runs
 whose overall level is far from normal, whose counts should not be trusted. The bottom
-panel is the run gain on a log axis. Flat stretches are stable detector periods; the
+panel is the run brightness on a log axis. Flat stretches are stable detector periods; the
 steps between them are the runs worth looking up in the logbook.
 
 **`segments_hist.png`** — how fragmented the dataset is. Left: how many consecutive runs
@@ -404,8 +365,8 @@ CCDB, the Calibration Constant Database, which holds a given set of constants ag
 if a wire's status is constant over long stretches, and fits badly if channels die one at
 a time at random runs, since each event then needs its own range.
 
-`--segments` measures this directly. Over the reliable runs the dataset gives 1051 bad
-segments across 292 wires. Just under half of the segments are a single run, but those
+`--segments` measures this directly. Over the reliable runs the dataset gives 1015 bad
+segments across 298 wires. Just under half of the segments are a single run, but those
 single-run segments carry only **2 %** of all bad (run, wire) entries: the content is
 dominated by long stable stretches. Run-range tables are therefore a reasonable fit,
 with the short segments either dropped by a minimum-length cut or held in a small

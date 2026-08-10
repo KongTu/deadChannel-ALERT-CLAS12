@@ -4,174 +4,153 @@ One page. The full reference is in [README.md](README.md).
 
 **The problem.** We have one number per wire per run: the ADC integral, normalized to the
 trigger count. A wire is bad if that number is wrong. The difficulty is that "wrong"
-cannot be a fixed threshold — the number depends on which layer the wire is in, on how
-bright the run was, and on what that particular wire delivers when it is working.
+cannot be a fixed threshold — it depends on which layer the wire is in, on how bright the
+run was, and on what that particular wire delivers when it is working.
 
-So the wire is measured against two references, both evaluated run by run.
-
----
-
-## The wire used throughout: layer 4, wire 39
-
-This one wire shows every part of the method, because it is broken for part of the
-campaign and healthy for the rest.
-
-| run | `value` | median wire of layer 4 | `rel_to_layer` | `cv` | verdict |
-|---|---|---|---|---|---|
-| 21551 | 0.021 | 1.103 | 0.02 | 0.02 | `low/dead` |
-| 21643 | 0.091 | 1.518 | 0.06 | 0.06 | `low/dead` |
-| 22083 | 0.230 | 1.319 | 0.17 | 0.17 | `low/dead` |
-| 22247 | 1.437 | 1.408 | 1.02 | 1.01 | — |
-| 22638 | 1.398 | 1.338 | 1.04 | 1.02 | — |
-
-Dead early, then it recovers and reads like its neighbours. It is flagged in the runs
-where it is dead — 23 % of them — and left alone in the rest.
+Everything below is a **ratio taken inside a single run**, so anything that moves the whole
+detector together — beam current, gas, thresholds, trigger composition — cancels exactly.
+No run-level correction is applied, because none is needed.
 
 ---
 
-## Step 1 — what is normal *for this wire*?
+## The two references
 
-Every wire has its own working level, so each is compared against its own norm:
+**A — the wire against its neighbours.**
 
 ```
-rel  = value / wire_med
-gain = median of rel over all wires in the same run and layer
-cv   = rel / gain            <- what the step-2 cuts act on
+lay_med      = median value over the wires of that layer, in that run
+rel_to_layer = value / lay_med
 ```
 
-`cv = 1` means *this wire is at its own normal level, for this run's conditions*. Dividing
-by `gain` removes the run-wide breathing: the detector's overall level varies by more than
-an order of magnitude across the campaign, and 383 of 1111 runs sit below half normal.
+Per layer, because the layers genuinely differ: the median layer-1 wire delivers about
+three times the median layer-7 wire. This reference needs no history, so it sees a wire
+that was already broken before the first run.
 
-**Getting `wire_med` right is the subtle part.** It must be the wire's *healthy* level. The
-obvious choice — the median over all its runs — is wrong for exactly the wire above: with
-L4 W39 dead for a large share of the campaign, its all-run median lands at 0.649, between
-its dead and healthy levels. Its healthy runs then read 1.44/0.649 ≈ 2.2 and get flagged
-**hot**, which is backwards — those are the runs where it works.
+**B — the wire against itself.**
 
-So the norm is estimated only from runs where the wire reads like its layer *and* the
-detector was running at a normal level. For L4 W39 that gives **1.384**, from 548 runs,
-and its healthy runs now read `cv ≈ 1.01`.
+```
+own_norm = median of rel_to_layer over the runs where the wire reads like its layer
+           (its usual standing within the layer)
+cv       = rel_to_layer / own_norm
+```
 
-Both conditions matter. Allowing dim runs into the estimate fails the same way by another
-route: a weak wire most resembles its neighbours exactly when the whole detector is
-compressed, so its norm would be anchored on the dimmest runs and every normal run would
-look hot.
+`cv = 1` means *this wire is where it usually sits*.
 
-If a wire never shows 20 such runs, it gets no norm at all — `cv` is left undefined and it
-is judged on step 3 alone. Two wires are in that position, L1 W46 and L2 W55. If a wire's
-normal level was never observed, there is no honest statement to make about it having
-changed from normal.
+**Why B is needed.** Reference A asks every wire to fall to the same fraction of the layer
+median. That is fine for a typical wire, since 90 % of wires sit between 0.87 and 1.10 of
+their layer — but not for the rest. **L6 W61** normally reads 1.40× its layer. In run 22603
+it falls to 0.683, which is `cv` 0.41 — it has lost nearly 60 % of its output — yet
+`rel_to_layer` is still 0.57, above the 0.5 cut. Reference A alone would miss it, and
+Raphael circled it.
 
-**Sanity check.** Layer 1 wire 1 is healthy throughout. In run 22603 it reads `value` 2.095
-against a norm of 2.225 → `cv` 0.981. In run 22897, where the detector was at 26 % of
-normal, it reads 0.623 — a third as much — but `gain` falls with it, so `cv` is 1.024. Fine
-in both.
+**Why A is needed.** `cv` is normalized to the wire's own standing, so a wire that is
+always weak reads `cv ≈ 1`. Reference A is what sees it.
 
 ---
 
-## Step 2 — three cuts on `cv`
-
-| verdict | rule | meaning |
-|---|---|---|
-| `low/dead` | `cv < 0.5` | under half its own normal |
-| `hot` | `cv > 2.0` | over twice its own normal |
-| `outlier` | `\|robust_z\| > 5` | sharp change vs the same wire in nearby runs |
-
-**`low/dead` — layer 1 wire 19, run 22603:** `value` 0.570 against a norm of 2.380, with
-`gain` 0.960 → **`cv` 0.249**. A quarter of its own normal.
-
-**`hot` — layer 4 wire 65, run 21604:** `value` 4.760 against a norm of 1.385 →
-**`cv` 8.06**, and 8.3× its layer. Unambiguous on both references.
-
-**`outlier` — layer 1 wire 26, run 23055.** This wire is flagged in only 3 % of runs:
-
-```
-run    23053  23054  23055  23056  23057
-cv      1.020  1.011  0.601  1.049  1.047
-```
-
-At 0.601 it stays inside the 0.5–2.0 band, so neither absolute cut fires. But its
-neighbours say 1.05 and this wire is reproducible to a fraction of a percent, so
-`robust_z = −8.9`. The local cut catches the single-run dropout.
-
-`robust_z` is `(cv − local median) / scale`, the local median being a rolling median over
-11 runs and `scale` a robust standard deviation floored at 0.05. The floor matters: a
-normalized wire reproduces to about 0.4 %, so without it a harmless 3 % wiggle would be a
-7σ excursion.
-
----
-
-## Step 3 — compare the wire with its neighbours, in the same run
-
-Step 2 needs to know what the wire delivers when healthy. Step 3 does not:
-
-```
-rel_to_layer = value / (median value of the wires of that layer, in that run)
-```
+## The five cuts
 
 | verdict | rule |
 |---|---|
+| `low/dead` | `cv < 0.5` |
 | `low vs layer` | `rel_to_layer < 0.5` |
+| `hot` | `cv > 2.0` |
 | `hot vs layer` | `rel_to_layer > 2.0` |
+| `outlier` | `\|robust_z\| > 5` |
 
-**Worked example — layer 1 wire 46, run 22603:** `value` 0.496 while the median layer-1
-wire reads 2.160, so `rel_to_layer = 0.23`. This is one of the two wires with no estimable
-norm, so `cv` is undefined and this is the only cut available — and it is enough.
-**`low vs layer`.**
+`robust_z` is `(cv − local median) / scale`, the local median being a rolling median over
+11 runs and `scale` a robust standard deviation floored at 0.05. It catches a sharp change
+that stays inside both absolute bands. **L1 W26** is flagged in 3 % of runs:
 
-The comparison is made *within a layer* because the layers genuinely differ — the median
-wire of layer 1 delivers about three times that of layer 7:
+```
+run    23053  23054  23055  23056  23057
+cv      1.010  1.003  0.597  1.026  1.025
+```
 
-| layer | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-|---|---|---|---|---|---|---|---|---|
-| median wire, run 22603 | 2.16 | 1.62 | 1.53 | 1.32 | 1.28 | 1.20 | 0.65 | 0.70 |
-
-This cut needs no gain correction: in a dim run the wire and its layer fall together, so
-the ratio is unchanged. Layer 1 wire 1 reads 0.97 in run 22603 and 0.99 in run 22897.
+At 0.597 no absolute cut fires, but the wire reproduces to a fraction of a percent, so
+`robust_z = −8.5`.
 
 ---
 
-## Putting it together
+## One wire, start to finish: layer 4, wire 39
 
-Five channels of run 22603:
+This wire is broken for part of the campaign and healthy for the rest, so it exercises
+every part of the method.
 
-| channel | `cv` | `rel_to_layer` | verdict | why |
+| run | `value` | `lay_med` | `rel_to_layer` | `cv` | verdict |
+|---|---|---|---|---|---|
+| 21551 | 0.021 | 1.103 | 0.02 | 0.02 | `low/dead` |
+| 22247 | 1.437 | 1.408 | 1.02 | 0.99 | — |
+| 22638 | 1.398 | 1.338 | 1.04 | 1.01 | — |
+
+Its `own_norm` is 1.03, estimated from the 854 runs in which it reads like its layer. It
+is flagged in the 23 % of runs where it is dead and left alone in the rest.
+
+**Estimating `own_norm` on healthy runs only is the point.** Take the median over the
+wire's *whole* history instead and the norm lands between its dead and healthy levels —
+its **good** runs then read about twice the norm and get flagged **hot**, which is
+backwards. On this dataset that mistake produced 2709 spurious flags across 11 wires.
+
+---
+
+## Five runs
+
+| run | brightness | bad | near cut | breakdown | |
+|---|---|---|---|---|---|
+| 21697 | 0.63 | 95 | 35 | 74 low, 11 outlier, 10 hot | a step in the campaign |
+| 22249 | 1.09 | 4 | 3 | 4 low | quiet plateau |
+| 22603 | 0.99 | 13 | 7 | 13 low | Raphael's test run |
+| 22897 | 0.26 | **3** | 0 | 3 low | detector at 26 % of normal |
+| 23055 | 0.14 | 56 | 18 | 53 outlier, 3 low | many wires dip together |
+
+Run 22897 is the check that matters: the detector delivered a quarter of its usual charge,
+every wire read low in absolute terms, and **3 of 576** were flagged. Layer 1 wire 1 reads
+0.623 there against 2.095 in run 22603 — and `rel_to_layer` is 0.99, `cv` 1.00 in both.
+
+Run 23055 is the opposite case: 53 wires change together sharply, while the other 520 read
+normally, so it is a real detector event rather than a run-level artefact. Its brightness
+of 0.14 is low enough that the statistics behind it are thin — `--min-gain 0.3` would
+exclude such runs.
+
+---
+
+## Run 22603 in detail
+
+| channel | `rel_to_layer` | `own_norm` | `cv` | verdict |
 |---|---|---|---|---|
-| L1 W1 | 0.98 | 0.97 | — | normal on both references |
-| L4 W39 | 1.03 | 1.05 | — | recovered by this run; flagged only in its dead period |
-| L1 W19 | **0.25** | **0.26** | `low/dead` | healthy historically, dead in this run |
-| L1 W46 | undefined | **0.23** | `low vs layer` | no norm can be estimated; the layer settles it |
-| L4 W67 | 0.92 | 0.52 | — | just above the cut; listed as near-threshold |
+| L1 W1 | 0.97 | 0.99 | 0.98 | — |
+| L4 W39 | 1.05 | 1.03 | 1.01 | — recovered by this run |
+| L1 W19 | **0.26** | 1.03 | **0.26** | `low/dead` |
+| L1 W46 | **0.23** | 0.96 | **0.24** | `low/dead` |
+| L6 W61 | 0.57 | **1.40** | **0.41** | `low/dead` — only reference B sees it |
+| L4 W67 | 0.52 | 0.78 | 0.66 | — just above both cuts, listed as near-threshold |
 
-Run 22603 gives **14 bad channels of 576**.
+**13 bad channels of 576.** Seven of Raphael's eight circled channels are flagged; the
+eighth, L4 W67, appears in the near-threshold list.
 
 ```bash
 python analyze_alert_adc.py all.csv --run 22603
 ```
 
-The `status` column carries one of five verdicts: `low/dead`, `low vs layer`, `hot`,
-`hot vs layer`, `outlier`. The thresholds that matter most are `--dead-frac` (0.5) and
-`--hot-frac` (2.0); they move the step-2 and step-3 cuts together.
-
-A threshold is a line drawn through a continuum, so the report also lists channels that
-came within 30 % of a cut without firing — 6 of them in run 22603, including L4 W67 at
-`rel_to_layer` 0.52. Adjust with `--margin`.
+The thresholds that matter are `--dead-frac` (0.5) and `--hot-frac` (2.0); they move both
+references together. Channels within 30 % of a cut are listed separately — adjust with
+`--margin`.
 
 ---
 
-## The three traps this avoids
+## The traps this avoids
 
-**A dip that affects everything.** Run 22603 sits about 6 % below its own local baseline —
-and **all 576 wires read low**, not some of them. A normalized wire reproduces to about
-0.4 %, so a coherent 6 % shift is many sigmas for every wire at once, and judged only
-against nearby runs the whole chamber looks dead. Dividing by `gain` removes it.
+**A dip that affects everything.** Run 22603 sits about 6 % below its own local baseline,
+and all 576 wires read low. Comparing each wire only against its own recent runs makes
+that a many-sigma excursion for every wire at once, and the whole chamber looks dead.
+Both references are ratios within the run, so it cancels.
 
-**A wire that was never alive.** Any method that asks "has this wire changed?" is blind to
-a wire that has always been broken — it never changed. Step 3 asks "is this wire like its
-neighbours?" instead, and needs no history at all.
+**A wire that was never alive.** Any method asking "has this wire changed?" is blind to a
+wire that has always been broken — it never changed. Reference A needs no history.
 
-**A wire whose history is mostly broken.** If a wire's own norm is taken from all its runs,
-a wire that is dead for much of the campaign gets a norm halfway between dead and healthy,
-and its *good* runs are flagged as hot. Anchoring the norm on healthy runs at normal
-detector level is what prevents it — worth 2700 spurious flags across this dataset.
+**A wire stronger or weaker than its neighbours.** A single threshold against the layer
+median asks a 1.4× wire to lose 64 % of its output before firing, and a 0.7× wire only
+29 %. Reference B asks the same question of every wire.
+
+**A wire whose history is mostly broken.** Anchoring its norm on its healthy runs is what
+stops its good runs being flagged hot.
