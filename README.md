@@ -1,8 +1,7 @@
 # deadChannel-ALERT-CLAS12
 
-Service task for CLAS12: find **dead / bad AHDC wires** in the ALERT detector by looking
-at each wire's ADC value as a function of run number, and flagging runs where a wire
-behaves abnormally relative to its neighboring runs.
+Service task for CLAS12: find **dead / bad AHDC wires** in the ALERT detector from each
+wire's ADC (analogue-to-digital converter) value as a function of run number.
 
 The AHDC (ALERT Hyper Drift Chamber) has **8 layers** with wire counts
 `{47, 56, 56, 72, 72, 87, 87, 99}` = **576 wires** total. For every run, the CLAS12
@@ -15,18 +14,21 @@ values into a flat CSV and analyzes them.
 
 ```
 coatjava reconstruction        clas12-timeline                this repo
-   (AHDC::adc bank)   ─────►  per-run, per-wire ADC   ─────►  CSV  ─►  plots + flagged runs
+   (AHDC::adc bank)   ─────►  per-run, per-wire ADC   ─────►  CSV  ─►  plots + bad channels
                               timelines (HIPO files)
 ```
 
 The per-wire ADC values shown on the CLAS12 monitoring timeline
 (e.g. `https://clas12mon.jlab.org/rgl/pass0_v10.3_alert/alert/timeline/`)
-are stored as `GraphErrors` (one point per run) inside HIPO files. `dump_alert_adc_csv.groovy`
-dumps them to CSV; `analyze_alert_adc.py` (or the notebook) analyzes the CSV.
+are stored as `GraphErrors` (one point per run) inside HIPO files — the columnar data
+format used throughout CLAS12. `dump_alert_adc_csv.groovy` dumps them to CSV;
+`analyze_alert_adc.py` (or the notebook) analyzes the CSV.
 
 > **Note on the quantity.** The timeline value is the per-wire ADC integral
 > *normalized to the trigger count*, not a raw average ADC. It is the right quantity for
-> tracking a wire's relative health across runs.
+> tracking a wire's relative health across runs. It is **not** the same quantity as
+> `<adcMax>` in the online-monitoring logbook figures, so the two will not agree
+> channel-for-channel.
 
 ---
 
@@ -34,12 +36,22 @@ dumps them to CSV; `analyze_alert_adc.py` (or the notebook) analyzes the CSV.
 
 | File | What it is |
 |------|------------|
-| `dump_alert_adc_csv.groovy` | Reads the deployed ALERT ADC timeline HIPO files (input: clas12mon URL or a directory of timeline `.hipo` files) and writes the per-wire CSV. Run on the JLab `ifarm`. |
-| `analyze_alert_adc.py` | Command-line tool: plot one wire vs run, and/or scan all wires and flag abnormal runs. |
-| `analyze_alert_adc.ipynb` | Same analysis as a Jupyter notebook (plots render inline). |
+| `dump_alert_adc_csv.groovy` | Reads the deployed ALERT ADC timeline HIPO files (input: clas12mon URL or a directory of timeline `.hipo` files) and writes the per-wire CSV. Runs on the JLab `ifarm`. |
+| `analyze_alert_adc.py` | Command-line tool: per-run maps and tables, bad channels per run, run-range segmentation, single-wire plots, full scan. |
+| `analyze_alert_adc.ipynb` | The same analysis as a notebook, with the method written out. It imports the module, so the two cannot disagree. |
 | `all.csv` | Full dataset — 576 wires × 1112 runs (runs 21317–23061). |
-| `test.csv` | Smaller subset (layers 1–2 only) for quick tests. |
-| `flagged.csv` | Example scan output: the flagged (run, wire) entries. |
+| `test.csv` | Smaller subset (57 wires: layer 1, plus the first 10 wires of layer 2) for quick tests. |
+
+Generated outputs:
+
+| File | What it is |
+|------|------------|
+| `run<N>_map.png` | Layer-vs-wire map of one run, in the online-monitoring layout. |
+| `run<N>_panels.png` | The same run as 8 per-layer panels. |
+| `run<N>_bad.csv` | The bad channels of that run, one row each. |
+| `bad_per_run.png` / `bad_per_run.csv` | Bad channels per run across the campaign. |
+| `segments.csv` / `segments_hist.png` | Contiguous run ranges over which each wire is bad. |
+| `flagged.csv` | Every bad (run, wire) entry in the dataset. |
 
 ### CSV formats
 
@@ -54,10 +66,23 @@ run, layer_number, layer_code, wire, value, graph_name
 - `wire`         — wire number within the layer
 - `value`        — trigger-normalized ADC for that wire in that run
 
-Output (`flagged.csv`) adds the analysis columns:
+Output (`flagged.csv`, and `run<N>_bad.csv` without `local_median`):
 
 ```
-run, layer_number, layer_code, wire, value, local_median, robust_z, reason
+run, layer_number, layer_code, wire, value, wire_med, gain, cv,
+rel_to_layer, local_median, robust_z, status
+```
+
+`bad_per_run.csv`:
+
+```
+run, n_bad, n_chronic, n_low, n_hot, n_outlier, gain, run_ok, n_wires
+```
+
+`segments.csv`:
+
+```
+layer_number, wire, run_start, run_end, n_runs, status
 ```
 
 ---
@@ -66,8 +91,7 @@ run, layer_number, layer_code, wire, value, local_median, robust_z, reason
 
 **Producing the CSV** (`dump_alert_adc_csv.groovy`) runs on the JLab `ifarm` and needs
 **coatjava** installed (it provides the `run-groovy` launcher with the HIPO/GROOT
-libraries). The timeline HIPO files live on the JLab filesystem, so this step runs there.
-The CSVs are already committed here, so you can skip this step unless you want to refresh
+libraries). The CSVs are already committed here, so this step is only needed to refresh
 the data.
 
 **Analysis** runs anywhere with Python 3 and:
@@ -80,38 +104,108 @@ pip install jupyterlab
 
 ---
 
-## Quick start (analysis only)
+## How to run it
 
-Scan every wire and write the flagged runs + print a summary of the worst wires:
+### Bad channels in one run
+
+The main output: the layer-vs-wire map that lines up with the online-monitoring logbook
+entries, the same run as per-layer panels, and the table of bad channels.
 
 ```bash
+python analyze_alert_adc.py all.csv --run 22603
+```
+
+writes `run22603_map.png`, `run22603_panels.png` and `run22603_bad.csv`. Use
+`--run-prefix` to send them somewhere else:
+
+```bash
+python analyze_alert_adc.py all.csv --run 22603 --run-prefix figures/r22603
+```
+
+### The other outputs
+
+```bash
+# bad channels per run, across the campaign
+python analyze_alert_adc.py all.csv --summary bad_per_run.png --summary-csv bad_per_run.csv
+
+# contiguous bad-run ranges per wire; also writes segments_hist.png
+python analyze_alert_adc.py all.csv --segments segments.csv
+
+# one wire against run number
+python analyze_alert_adc.py all.csv --layer 6 --wire 61 --plot L6W61.png
+
+# every bad (run, wire) entry, plus the per-wire summary printed to screen
 python analyze_alert_adc.py all.csv --scan flagged.csv
 ```
 
-Plot a single wire and list its flagged runs:
+`segments_hist.png` is named automatically from the `--segments` filename.
+
+### Everything in one pass
+
+Each invocation re-reads and re-analyzes the 35 MB input, so combine the modes when you
+want several outputs (about 4 s in total):
 
 ```bash
-python analyze_alert_adc.py all.csv --layer 1 --wire 1 --plot l1_w1.png
+python analyze_alert_adc.py all.csv \
+  --run 22603 \
+  --summary bad_per_run.png --summary-csv bad_per_run.csv \
+  --segments segments.csv \
+  --scan flagged.csv
 ```
 
-Use `test.csv` instead of `all.csv` for a fast first run.
+### Several runs at once
+
+```bash
+for r in 21563 21632 21697 21914 22498 22603; do
+  python analyze_alert_adc.py all.csv --run $r --run-prefix "runs/r$r"
+done
+```
+
+Good candidates are the run numbers where the bad-channel count steps in
+`bad_per_run.png` — those are the ones most likely to have a logbook entry.
 
 ### Options
 
 | Option | Default | Meaning |
 |--------|---------|---------|
+| `--run N` | – | per-run report: map, per-layer panels, bad-channel table |
+| `--run-prefix STR` | `run<N>` | output prefix for `--run` |
+| `--summary [PNG]` | `bad_per_run.png` | bad channels per run |
+| `--summary-csv CSV` | – | also write the per-run counts |
+| `--segments [CSV]` | `segments.csv` | contiguous bad-run ranges per wire (+ histogram) |
 | `--layer N --wire M` | – | which wire to plot |
 | `--plot FILE.png` | auto | output plot path |
-| `--scan [FILE.csv]` | `alert_adc_flagged.csv` | scan all wires, write flagged runs |
+| `--scan [FILE.csv]` | `alert_adc_flagged.csv` | scan all wires, write every bad entry |
+| `--dead-frac F` | 0.5 | flag `cv` below this, and wires below this fraction of their layer |
+| `--hot-frac F` | 2.0 | flag `cv` above this, and wires above this fraction of their layer |
+| `--threshold X` | 5.0 | robust-z cutoff for an `outlier` |
 | `--window N` | 11 | rolling-median window (runs) used as the local baseline |
-| `--threshold X` | 5.0 | robust-z cutoff for an outlier |
-| `--dead-frac F` | 0.2 | flag a value below `F × (wire median)` |
+| `--min-scale F` | 0.05 | floor on the robust sigma, in `cv` units |
+| `--min-gain F` | 0.1 | runs dimmer than this are marked `run_ok = False` |
+| `--max-gain F` | 10 | runs brighter than this are marked `run_ok = False` |
+| `--global-gain` | off | normalize per run only, not per run *and* layer |
+| `--no-run-norm` | off | cut on the raw value instead of the run-normalized `cv` |
+
+With no mode option at all, the tool performs a full scan.
+
+### Sensitivity
+
+`--dead-frac` and `--hot-frac` move the per-run cut and the per-wire cut together, so
+scanning them tells you how firm the answer is:
+
+```bash
+python analyze_alert_adc.py all.csv --run 22603 --dead-frac 0.4 --run-prefix r22603_strict
+python analyze_alert_adc.py all.csv --run 22603 --dead-frac 0.6 --run-prefix r22603_loose
+```
+
+`--threshold` and `--min-scale` affect only the `outlier` category.
 
 ### Or use the notebook
 
-Open `analyze_alert_adc.ipynb` in `jupyter lab`, set `CSV_PATH` in the first cell
-(`all.csv` or `test.csv`), and run top to bottom. Plots render inline. The cells let you
-plot a chosen wire, scan all wires, save `flagged.csv`, and auto-plot the worst offenders.
+Open `analyze_alert_adc.ipynb` in `jupyter lab`, set `CSV_PATH` and `RUN_OF_INTEREST` in
+the setup cell, and run top to bottom. It imports `analyze_alert_adc.py`, so the notebook
+and the command line always do the same thing; the markdown sections explain the method
+and the detection function is printed from the module so it cannot go stale.
 
 ---
 
@@ -124,8 +218,8 @@ plot a chosen wire, scan all wires, save `flagged.csv`, and auto-plot the worst 
 
 The input is either the **clas12mon timeline URL** (as above) or a **directory** of
 deployed timeline `.hipo` files — not a single HIPO file. It keeps only AHDC ADC wire
-graphs (`ahdc_adc_layer<L>_wire_number<WW>`) and skips ATOF / time / residual graphs.
-Sanity check:
+graphs (`ahdc_adc_layer<L>_wire_number<WW>`) and skips the ATOF (ALERT Time-Of-Flight),
+time and residual graphs. Sanity check:
 
 ```bash
 cut -d, -f6 all.csv | sort -u    # should list only ahdc_adc_... graph names
@@ -133,104 +227,151 @@ cut -d, -f6 all.csv | sort -u    # should list only ahdc_adc_... graph names
 
 ---
 
-## How a wire gets flagged
+## How a wire gets called bad
 
-Each wire is judged **against itself in nearby runs**, because ADC levels drift slowly
-over a run period (gas conditions, thresholds, calibration). For one wire, sorted by run,
-two cuts are applied and a run is flagged if **either** fires; the `reason` column
-records which one (`low/dead` takes precedence if both fire).
+### Step 1 — put every run on a common scale
 
-**Cut 1 — `outlier` (local):** `|robust_z| > threshold` (default 5).
-Catches a run whose value departs sharply from the neighboring runs (spike or dropout).
+The overall ADC level of the detector breathes from run to run by large factors: beam
+current, trigger composition, gas, high voltage, thresholds and the normalization all
+move it. Across runs 21317–23061 the level spans more than an order of magnitude and
+**366 of 1111 runs read below half the campaign-typical level**.
 
-**Cut 2 — `low/dead` (global to the wire):** `value < dead_frac × (wire median)`
-(default 0.2). Catches a value that has collapsed relative to the wire's own typical
-level, even if the collapse is gradual or sustained.
+That coherent breathing is divided out before any per-wire statement is made. Judged
+against its own neighbouring runs alone, a wire in a run that is globally 6 % low sits
+many robust sigmas below its local baseline — and so does every other wire, so the whole
+detector would be flagged for a property of the run.
 
-**Why two cuts.** `robust_z` catches sharp local changes, but if a wire is dead for many
-runs in a row, the local median inside that stretch also goes to zero, so `robust_z`
-stops seeing anything unusual — the dead runs look normal *relative to their (also-dead)
-neighbors*. Cut 2 compares against the wire's overall median instead, and catches the
-sustained death.
+| symbol | definition | meaning |
+|---|---|---|
+| `wire_med` | median of `value` over all runs, per wire | the wire's own normal |
+| `rel` | `value / wire_med` | the wire relative to its own normal |
+| `gain` | median of `rel` over all wires in the same **run and layer** | how bright this run was |
+| `cv` | `rel / gain` | **what the per-run cuts act on** |
 
-### Glossary of the variables
+`cv = 1` means the wire is at its own typical level once the run-wide and layer-wide
+scale is removed. A dead wire goes to `cv → 0`, a hot one to `cv ≫ 1`, regardless of how
+bright the run was. The gain is taken **per layer** so that a change affecting one
+superlayer does not leak into the others.
 
-**`value`** — the per-wire ADC quantity for that run (trigger-normalized integral).
+**Runs where the detector was effectively off.** Dividing by the gain rescues a run that
+is uniformly 30 % low; it does not rescue a run with `gain ≈ 0.01`, where the values are
+consistent with noise. Those runs — 106 of 1111 at the default `--min-gain 0.1` — are
+kept but marked `run_ok = False`, shaded grey in the summary plot, and excluded when
+building run ranges, so that a few such runs scattered through a stable period do not
+chop one long segment into many short ones.
 
-**`local_median`** — centered rolling median of `value` over `--window` runs: the level
-you would *expect* for this run given its neighbors. A median is used (not a mean) so
-that a few dead runs inside the window don't drag the baseline down.
+### Step 2 — three per-run cuts, on `cv`
 
-**`detrended`** — `value − local_median`: the residual after removing the slow drift,
-i.e. how far this run is from local normal.
+An entry is flagged if any cut fires. `status` records which.
 
-**`MAD`** — *median absolute deviation* of the residuals:
-`MAD = median( |detrended − median(detrended)| )`. A robust measure of the normal
-run-to-run scatter. The usual standard deviation is unusable here because it *squares*
-deviations, so a single dead run inflates it — and the inflated spread then hides the
-very anomaly that caused it. A median ignores extreme values by construction: up to half
-the points can be anomalous before MAD is misled.
+**`low/dead`:** `cv < dead_frac` (default 0.5). The wire delivers less than half its own
+normal charge for this run's conditions.
 
-**`1.4826`** — a unit-conversion constant, nothing more. For Gaussian data, MAD
-converges to `0.6745 σ` (0.6745 is the z-value of the 75th percentile — the median
-absolute deviation spans the middle 50% of a normal distribution). Dividing by 0.6745,
-i.e. multiplying by `1/0.6745 = 1.4826`, rescales MAD so that on clean Gaussian data it
-equals the standard deviation.
+**`hot`:** `cv > hot_frac` (default 2.0). More than twice normal — noisy, oscillating, or
+picking up a neighbour. These show up as bright cells in the online monitoring maps and
+are worth recording alongside the dead ones.
 
-**`scale`** — `1.4826 × MAD`: the *robust standard deviation* — the estimate of this
-wire's normal scatter, immune to the anomalies being hunted. (Worked example: for
-residuals `0, ±1, ±0.5, 0, ±1, 0, 20`, the classical SD is ≈ 6.0 — inflated 5× by the
-single outlier — while `scale` ≈ 1.1, the honest scatter of the healthy points. The
-outlier is 3σ under the classical SD but ~18 robust sigmas under `scale`.)
+**`outlier`:** `|robust_z| > threshold` (default 5). A sharp change relative to the
+**same wire in adjacent runs**, which catches a wire changing state even while it stays
+inside the absolute bands.
 
-**`robust_z`** — `detrended / scale`: how many robust sigmas this run sits from its
-local baseline. Read exactly like an ordinary z-score ("7σ below expectation"), but
-built from medians throughout so it stays honest when part of the series is bad.
-Edge case: a perfectly flat series has `MAD = 0`, so `scale = 0`; Cut 1 is then disabled
-(`robust_z` set to 0) and only Cut 2 can fire.
+### Step 3 — one per-wire cut, on the absolute level
 
-**`dead_floor`** — `dead_frac × (wire median over all runs)`: the threshold for Cut 2.
-Note a wire that is dead in *every* run has a median ≈ 0, so its `dead_floor` ≈ 0 and
-Cut 2 never fires — that case is caught by `permanently_low` below.
+**`always low` / `always hot`:** the wire's all-run median divided by that of the median
+wire in the **same layer** (`rel_to_layer`), outside `[dead_frac, hot_frac]`.
 
-**`flag` / `reason`** — `flag` is the OR of the two cuts; `reason` is `outlier` or
-`low/dead`.
+`cv` is normalized to each wire's own median and is therefore structurally blind to a
+wire that is low in *every* run: such a wire reads `cv ≈ 1`, perfectly normal for itself.
+The comparison is made per layer because the absolute level differs by a factor of about
+3 between layer 1 and layer 7. These wires are reported as bad in **every** run, which is
+what a per-run dead-channel list has to contain.
 
-### The scan summary (per wire)
+Seven wires qualify over 21317–23061, all on the low side:
 
-**`frac_flagged`** — `n_flagged / n_runs`: fraction of this wire's runs that were
-flagged. Used for ranking suspects; no automatic cut is applied to it.
+| wire | `rel_to_layer` |
+|---|---|
+| L1 W46 | 0.24 |
+| L2 W55 | 0.26 |
+| L3 W56 | 0.27 |
+| L4 W67 | 0.38 |
+| L6 W61 | 0.38 |
+| L5 W5 | 0.45 |
+| L2 W54 | 0.49 |
 
-**`permanently_low`** — `(wire median) < dead_frac × global_typical`, where
-`global_typical` is the median across all 576 wires of each wire's median value.
-Catches wires that are essentially dead in every run, which the per-run cuts
-structurally cannot flag.
+### Glossary
 
-Note that the tool ranks suspects but does not by itself declare a wire dead — the
-final per-wire verdict (e.g. a cut on `frac_flagged`, or requiring a contiguous run
-range of flags) is left to the analyst.
+**`local_median`** — centered rolling median of `cv` over `--window` runs: the level
+expected for this run given its neighbours. A median, so a few bad runs inside the window
+do not drag the baseline.
 
-### Tuning
+**`detrended`** — `cv − local_median`: how far this run sits from local normal.
 
-- `--window`: widen for long, stable run periods; narrow if the baseline drifts fast.
-- `--threshold`: lower it to catch subtler dropouts (more sensitive, more false flags).
-- `--dead-frac`: raise toward 0.5 if "dead" should mean "clearly below normal" rather
-  than "near zero".
+**`MAD`** — median absolute deviation of the residuals,
+`median(|detrended − median(detrended)|)`. The ordinary standard deviation *squares*
+deviations, so one dead run inflates it — and the inflated spread then hides the very
+anomaly that caused it. A median ignores extremes by construction.
 
-When run on real data, expect a few wires flagged for a single isolated run (statistical
-noise). The wires that matter have a high `frac_flagged` or `permanently_low = True`.
+**`1.4826`** — unit conversion, nothing more. For Gaussian data `MAD → 0.6745 σ`
+(0.6745 is the z-value of the 75th percentile), so multiplying by `1/0.6745 = 1.4826`
+makes the estimate equal the standard deviation on clean data.
+
+**`scale`** — `max(1.4826 × MAD, min_scale)`: the robust sigma, with a floor. After
+normalization a typical wire reproduces to about 0.4 %, so without the floor a harmless
+3 % wiggle is a 7σ excursion and the `outlier` cut fires across the whole detector.
+`--min-scale 0.05` says "nothing counts as anomalous unless it moves by more than about
+5 % of the wire's normal level".
+
+**`robust_z`** — `detrended / scale`: robust sigmas from the local baseline. Read like an
+ordinary z-score, but built from medians so it stays honest when part of the series is bad.
+
+**`frac_flagged`** (from `--scan`) — flagged runs / total runs, per wire. Used for
+ranking suspects; no automatic cut is applied to it.
+
+The tool ranks and reports; the final per-wire verdict is left to the analyst.
 
 ---
 
-## Typical workflow
+## Reading the figures
 
-```bash
-# scan for bad wires
-python analyze_alert_adc.py all.csv --scan flagged.csv
+**`run<N>_map.png`** — two panels, both layer (vertical) × wire (horizontal), grey where
+the wire does not exist. The top panel is the raw trigger-normalized integral on a log
+colour scale, which is the like-for-like comparison with what is posted online; its
+horizontal banding is the real level difference between layers. The bottom panel is `cv`,
+white at 1, with magenta rings on channels bad in this run and black dashed rings on
+channels bad in every run.
 
-# inspect a suspect wire
-python analyze_alert_adc.py all.csv --layer 1 --wire 1 --plot l1_w1.png
-```
+**`run<N>_panels.png`** — the same run as 8 per-layer panels, with two series, because
+the two kinds of bad channel are judged on two different quantities and each marker sits
+on the curve it came from. Blue dots are `cv` (this run against the wire's own norm) and
+carry the red `bad in this run` rings; grey squares are `rel_to_layer` (the wire's
+all-run median against the median wire of its layer) and carry the black dashed
+`bad in every run` rings. Shaded bands mark the dead and hot regions.
 
-`flagged.csv` is the per-wire, per-run list of bad runs — the basis for recording dead
-channels to a database.
+**`bad_per_run.png`** — the campaign summary. The top panel counts bad channels per run:
+red points for the total, blue and magenta for the channels bad in that particular run,
+and a black dashed line for the channels bad in every run. Grey vertical bands mark runs
+whose overall level is far from normal, whose counts should not be trusted. The bottom
+panel is the run gain on a log axis. Flat stretches are stable detector periods; the
+steps between them are the runs worth looking up in the logbook.
+
+**`segments_hist.png`** — how fragmented the dataset is. Left: how many consecutive runs
+a wire stays bad. Right: how many separate bad stretches each affected wire has. This is
+the input to the storage question below.
+
+---
+
+## Storing the result
+
+The dead channels are destined for a database. CLAS12 keeps calibration constants in
+CCDB, the Calibration Constant Database, which holds a given set of constants against a
+**range of runs**, with alternative sets available as named variations. That model fits
+if a wire's status is constant over long stretches, and fits badly if channels die one at
+a time at random runs, since each event then needs its own range.
+
+`--segments` measures this directly. Over the reliable runs the dataset gives 991 bad
+segments across 290 wires. Just under half of the segments are a single run, but those
+single-run segments carry only **2 %** of all bad (run, wire) entries: the content is
+dominated by long stable stretches, with the seven always-low wires appearing as single
+segments spanning the whole campaign. Run-range tables are therefore a reasonable fit,
+with the short segments either dropped by a minimum-length cut or held in a small
+per-run exception list.
