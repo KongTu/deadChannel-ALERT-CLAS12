@@ -25,7 +25,7 @@ The per-wire ADC values shown on the CLAS12 monitoring timeline
 (e.g. `https://clas12mon.jlab.org/rgl/pass0_v10.3_alert/alert/timeline/`)
 are stored as `GraphErrors` (one point per run) inside HIPO files — the columnar data
 format used throughout CLAS12. `dump_alert_adc_csv.groovy` dumps them to CSV;
-`analyze_alert_adc.py` (or the notebook) analyzes the CSV.
+`analyze_alert_adc.py` analyzes the CSV.
 
 > **Note on the quantity.** The timeline value is the per-wire ADC integral
 > *normalized to the trigger count*, not a raw average ADC. It is the right quantity for
@@ -41,7 +41,6 @@ format used throughout CLAS12. `dump_alert_adc_csv.groovy` dumps them to CSV;
 |------|------------|
 | `dump_alert_adc_csv.groovy` | Reads the deployed ALERT ADC timeline HIPO files (input: clas12mon URL or a directory of timeline `.hipo` files) and writes the per-wire CSV. Runs on the JLab `ifarm`. |
 | `analyze_alert_adc.py` | Command-line tool: per-run maps and tables, bad channels per run, run-range segmentation, single-wire plots, full scan. |
-| `analyze_alert_adc.ipynb` | The same analysis as a notebook. It imports the module, so the two cannot disagree. |
 | `ALGORITHM.md` | One-page guide to how a channel gets called bad, with worked numbers. |
 | `all.csv` | Full dataset — 576 wires × 1112 runs (runs 21317–23061). |
 | `test.csv` | Smaller subset (57 wires: layer 1, plus the first 10 wires of layer 2) for quick tests. |
@@ -102,8 +101,6 @@ the data.
 
 ```bash
 pip install pandas numpy matplotlib
-# for the notebook:
-pip install jupyterlab
 ```
 
 ---
@@ -208,13 +205,6 @@ python analyze_alert_adc.py all.csv --run 22603 --dead-frac 0.6 --run-prefix r22
 Raising `--dead-frac` flags more channels, lowering it flags fewer.
 
 `--threshold` and `--min-scale` affect only the `outlier` category.
-
-### Or use the notebook
-
-Open `analyze_alert_adc.ipynb` in `jupyter lab`, set `CSV_PATH` and `RUN_OF_INTEREST` in
-the setup cell, and run top to bottom. It imports `analyze_alert_adc.py`, so the notebook
-and the command line always do the same thing. Start it from the repository folder, or the
-import will fail.
 
 ---
 

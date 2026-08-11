@@ -21,15 +21,24 @@ What it does
                          calibration constant database, CCDB, which holds a
                          given set of constants against a range of runs)
 
-Everything is a ratio taken inside a single run
------------------------------------------------
+The run's overall scale cancels
+-------------------------------
 The raw timeline value is a trigger-normalized ADC integral, but the overall
 level still breathes from run to run by large factors: beam current, gas, high
 voltage, thresholds and trigger composition all move it, and over runs
 21317-23061 it varies by more than an order of magnitude.
 
-Both references below are ratios formed within one run, so that common motion
-cancels exactly and no separate run-normalization step is needed.
+`rel_to_layer` divides the wire by the median wire of its layer *in the same
+run*, so a factor common to that whole run cancels. Everything after it is built
+from `rel_to_layer` and inherits the invariance -- including `own_norm`, which is
+a median over many runs, not a per-run quantity. Multiplying any run's values by
+an arbitrary factor leaves rel_to_layer, own_norm, cv and every verdict
+unchanged, so no separate run-normalization step is needed.
+
+Not everything is confined to one run. `own_norm` spans a wire's healthy runs
+(301-1106 of them here), `local_median` a rolling window of `--window`, and
+`brightness` the whole campaign. What they have in common is that none of them
+carries the run's overall level.
 
 Reference A -- the wire against its neighbours
 ----------------------------------------------
@@ -80,9 +89,15 @@ in front of you.
 Run quality
 -----------
 `brightness` is the overall level of a run relative to the campaign, taken from
-the layer medians. It plays no part in the cuts. It only marks runs where the
-detector was effectively off (--min-gain, --max-gain), whose values are noise
-rather than measurements.
+the layer medians. It plays no part in the cuts.
+
+It flags runs that read far from the campaign level (--min-gain, --max-gain).
+Here that is 109 of 1111 runs: 107 read low -- the median wire at about 3 % of
+its usual value -- and 2 read high. Why is not visible in this data; the logbook
+would say. What is visible is that their numbers behave worse: the wire-to-wire
+spread of `rel_to_layer` within a run is 1.6x wider than in normal runs, and the
+median bad-channel count is 50 rather than 12. Their counts are therefore
+reported but not trusted.
 
 Examples
 --------
@@ -156,8 +171,9 @@ def add_normalization(df, dead_frac=0.5, hot_frac=2.0, min_healthy=20):
     df = df.copy()
 
     # Reference A -- the wire against its NEIGHBOURS in the same run and layer.
-    # A ratio taken inside one run, so anything that moves the whole detector
-    # together -- beam current, gas, trigger composition -- cancels exactly.
+    # Numerator and denominator come from the same run, so anything that moves
+    # the whole detector together -- beam current, gas, trigger composition --
+    # cancels. Every quantity below is built from this one and inherits that.
     df["lay_med"] = df.groupby(["run", "layer_number"]).value.transform("median")
     df["rel_to_layer"] = df.value / df.lay_med
 
@@ -195,8 +211,8 @@ def add_normalization(df, dead_frac=0.5, hot_frac=2.0, min_healthy=20):
     df["cv"] = df.rel_to_layer / df.own_norm
 
     # How bright the run was overall, relative to the campaign. Used only to
-    # mark runs where the detector was effectively off; it plays no part in the
-    # cuts, which are all ratios taken inside a single run.
+    # mark runs that read far from the campaign level; it plays no part in the
+    # cuts, which are insensitive to it by construction.
     lm = df.groupby(["run", "layer_number"]).lay_med.first().rename("lm").reset_index()
     lm["typ"] = lm.groupby("layer_number").lm.transform("median")
     df = df.merge((lm.lm / lm.typ).groupby(lm.run).median().rename("brightness"),
@@ -207,8 +223,8 @@ def add_normalization(df, dead_frac=0.5, hot_frac=2.0, min_healthy=20):
 def mark_run_quality(df, min_gain=0.1, max_gain=10.0):
     """Mark runs whose OVERALL level is far from the campaign norm.
 
-    The cuts are ratios taken inside a single run, so a run that is uniformly
-    30 % low needs no special handling. A run where the detector was essentially
+    The cuts are insensitive to a run's overall scale, so a run that is
+    uniformly 30 % low needs no special handling. A run where the detector was essentially
     off (brightness ~ 0.01) is different: there the values are consistent with
     noise and the surviving structure is statistical. Those runs are kept but
     marked `run_ok = False`, because their bad-channel count says more about the
@@ -547,13 +563,25 @@ def plot_summary(res, outpath, csv_path=None):
         for r in per.loc[~per.run_ok.astype(bool), "run"]:
             for ax in (ax0, ax1):
                 ax.axvspan(r - 0.5, r + 0.5, color="0.85", zorder=0)
-        ax0.plot([], [], color="0.85", lw=6, label="run reads far from normal level")
+        ax0.plot([], [], color="0.85", lw=6, label="run reads far from the campaign level")
+    # Every flagged entry carries exactly one status, so the five series below
+    # sum to n_bad run by run. All five are drawn: omitting any of them leaves
+    # an unexplained gap between the points and the lines.
     ax0.plot(per.run, per.n_bad, "-", color="0.8", lw=0.8, zorder=1)
-    ax0.scatter(per.run, per.n_bad, s=9, color="firebrick", zorder=2, label="all bad")
+    ax0.scatter(per.run, per.n_bad, s=9, color="firebrick", zorder=2,
+                label="all bad  (= sum of the five below)")
     ax0.plot(per.run, per.n_low, lw=1, color="steelblue", label="low vs its own norm")
-    ax0.plot(per.run, per.n_hot, lw=1, color="magenta", label="hot vs its own norm")
     ax0.plot(per.run, per.n_low_layer, lw=1.2, color="black", ls="--",
              label="low vs its layer")
+    ax0.plot(per.run, per.n_hot, lw=1, color="magenta", label="hot vs its own norm")
+    ax0.plot(per.run, per.n_hot_layer, lw=1.2, color="darkgoldenrod", ls="--",
+             label="hot vs its layer")
+    ax0.plot(per.run, per.n_outlier, lw=1.2, color="teal", ls=":",
+             label="outlier (25 % change)")
+    gap = (per.n_bad - per[["n_low", "n_low_layer", "n_hot",
+                            "n_hot_layer", "n_outlier"]].sum(axis=1)).abs().max()
+    if gap:
+        print(f"WARNING: the per-run categories do not sum to the total (max gap {gap})")
     ax0.set_ylabel("bad channels in the run")
     ax0.set_title("AHDC: number of bad channels per run "
                   f"({per.run.min()}-{per.run.max()}, {len(per)} runs, 576 wires)")
@@ -566,8 +594,9 @@ def plot_summary(res, outpath, csv_path=None):
     ax1.set_ylabel("run brightness\n(overall ADC level)")
     ax1.set_xlabel("run number")
     ax1.grid(alpha=0.3)
-    ax1.text(0.005, 0.06, "runs far below 1 read low detector-wide; their bad-channel "
-             "count is less reliable", transform=ax1.transAxes, fontsize=7, color="0.35")
+    ax1.text(0.005, 0.06, "shaded runs read far from the campaign level; their numbers are "
+             "noisier, so their bad-channel count is reported but not trusted",
+             transform=ax1.transAxes, fontsize=7, color="0.35")
 
     fig.tight_layout()
     fig.savefig(outpath, dpi=130)
