@@ -18,3 +18,6 @@ bad_per_run.csv
 run*_bad.csv
 !examples/
 !examples/**
+
+# generated figure dumps
+figures/

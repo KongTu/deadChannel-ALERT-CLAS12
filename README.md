@@ -41,6 +41,8 @@ format used throughout CLAS12. `dump_alert_adc_csv.groovy` dumps them to CSV;
 |------|------------|
 | `dump_alert_adc_csv.groovy` | Reads the deployed ALERT ADC timeline HIPO files (input: clas12mon URL or a directory of timeline `.hipo` files) and writes the per-wire CSV. Runs on the JLab `ifarm`. |
 | `analyze_alert_adc.py` | Command-line tool: per-run maps and tables, bad channels per run, run-range segmentation, single-wire plots, full scan. |
+| `make_all_figures.py` | Writes every per-wire and per-run figure into `figures/`. Runs the analysis once and reuses it, and skips files that already exist, so it can be interrupted and rerun. |
+| `plot_outlier_example.py` | Draws `outlier_example.png`, the two-wire illustration of the 25 % cut. |
 | `ALGORITHM.md` | One-page guide to how a channel gets called bad, with worked numbers. |
 | `all.csv` | Full dataset — 576 wires × 1112 runs (runs 21317–23061). |
 | `test.csv` | Smaller subset (57 wires: layer 1, plus the first 10 wires of layer 2) for quick tests. |
@@ -153,6 +155,19 @@ python analyze_alert_adc.py all.csv \
   --segments segments.csv \
   --scan flagged.csv
 ```
+
+### Every figure at once
+
+```bash
+python make_all_figures.py                 # 576 per-wire + 1111 per-run figures
+python make_all_figures.py --only wire     # just one of the two sets
+python make_all_figures.py --only run
+```
+
+Writes `figures/per_wire/L<layer>_W<wire>.png` and `figures/per_run/run<N>.png` — about
+190 MB in total, and roughly ten minutes. The analysis runs once and is reused, so this is
+far quicker than 1687 separate invocations; existing files are skipped, so an interrupted
+run resumes where it stopped. `figures/` is gitignored.
 
 ### Several runs at once
 
